@@ -1,0 +1,58 @@
+#!/bin/sh
+# NIFSERVER hosted-app launcher — ExecStart of nifapp@<app>.service.
+#
+# WorkingDirectory is /srv/nifhost/apps/<app>. Inputs come from run.env, written
+# by the dashboard; they are validated again here and only ever passed as single
+# quoted arguments. `exec` replaces this shell, so no wrapper process stays in RAM.
+set -eu
+umask 0027
+
+fail() { echo "nifapp-run: $1" >&2; exit 64; }
+safe_rel() {
+  case "$1" in
+    ''|/*|-*|*..*|*/.*|.*|*[!A-Za-z0-9._/-]*) fail "invalid path" ;;
+  esac
+}
+
+case "${NIF_RELEASE:-}" in
+  r[0-9]*-[0-9a-f]*) ;;
+  *) fail "invalid release" ;;
+esac
+case "$NIF_RELEASE" in *[!a-z0-9-]*) fail "invalid release" ;; esac
+case "${NIF_PORT:-}" in ''|*[!0-9]*) fail "invalid port" ;; esac
+[ "$NIF_PORT" -ge 1024 ] && [ "$NIF_PORT" -le 65535 ] || fail "invalid port"
+STATE="${STATE_DIRECTORY:?StateDirectory missing}"
+LIB=/usr/local/lib/nifhost
+
+cd "releases/$NIF_RELEASE" || fail "release missing"
+export PORT="$NIF_PORT" HOST=127.0.0.1 HOSTNAME=127.0.0.1
+
+case "${NIF_RUNTIME:-}" in
+  nextjs)
+    mkdir -p "$STATE/next-cache"
+    exec /usr/bin/node node_modules/next/dist/bin/next start -H 127.0.0.1 -p "$NIF_PORT"
+    ;;
+  node)
+    safe_rel "${NIF_ENTRY:-}"
+    exec /usr/bin/node -- "$NIF_ENTRY"
+    ;;
+  laravel)
+    for d in storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs cache; do
+      mkdir -p "$STATE/$d"
+    done
+    # Framework caches go to the writable state dir; the release stays read-only.
+    export APP_SERVICES_CACHE="$STATE/cache/services.php" APP_PACKAGES_CACHE="$STATE/cache/packages.php" \
+      APP_CONFIG_CACHE="$STATE/cache/config.php" APP_ROUTES_CACHE="$STATE/cache/routes-v7.php" \
+      APP_EVENTS_CACHE="$STATE/cache/events.php" PHP_CLI_SERVER_WORKERS=2
+    exec /usr/bin/php -S "127.0.0.1:$NIF_PORT" -t public "$LIB/router.php"
+    ;;
+  php)
+    DOCROOT="${NIF_DOCROOT:-.}"
+    [ "$DOCROOT" = "." ] || safe_rel "$DOCROOT"
+    export PHP_CLI_SERVER_WORKERS=2
+    exec /usr/bin/php -S "127.0.0.1:$NIF_PORT" -t "$DOCROOT" "$LIB/router.php"
+    ;;
+  *)
+    fail "unsupported runtime"
+    ;;
+esac

@@ -1,0 +1,67 @@
+# /etc/systemd/system/nifapp@.service — one instance per hosted process app
+# (Next.js, Node.js, Laravel, PHP). Installed by deploy/hosting/install.sh.
+# The instance name (%i) is a validated app id; the dashboard can only
+# start/stop/restart these instances (see 50-nifhost.rules).
+[Unit]
+Description=NIFSERVER hosted app %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Unique throw-away UID per app: apps cannot read each other's files, env, or processes.
+DynamicUser=yes
+StateDirectory=nifhost/%i
+WorkingDirectory=/srv/nifhost/apps/%i
+# Read by systemd (root) before dropping privileges; the app cannot open these files.
+EnvironmentFile=/srv/nifhost/apps/%i/run.env
+EnvironmentFile=-/srv/nifhost/apps/%i/secrets/runtime.env
+ExecStart=/usr/local/lib/nifhost/nifapp-run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Filesystem: only this app's releases (read-only) and its own state directory.
+TemporaryFileSystem=/srv/nifhost:ro
+BindReadOnlyPaths=/srv/nifhost/apps/%i/releases
+InaccessiblePaths=-/etc/nifserver -/etc/cloudflared -/opt/nifserver -/srv/shared
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0027
+
+# Network: localhost (gateway, local database) and the internet; never the LAN or metadata IPs.
+IPAddressAllow=localhost
+IPAddressDeny=link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fc00::/7
+
+# Resources (4 GB host). Raise per app with: sudo systemctl edit nifapp@<id>
+MemoryMax=384M
+MemorySwapMax=256M
+CPUQuota=100%
+TasksMax=128
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

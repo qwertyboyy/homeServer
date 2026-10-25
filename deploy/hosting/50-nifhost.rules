@@ -1,0 +1,18 @@
+// /etc/polkit-1/rules.d/50-nifhost.rules — installed by deploy/hosting/install.sh
+// Lets the dashboard user (@DASHBOARD_USER@) manage ONLY hosted-app and build
+// units, with fixed verbs. No sudo; every other unit (nifserver-*, cloudflared,
+// apache2, smbd, ssh, netdata, ...) is unaffected.
+polkit.addRule(function (action, subject) {
+  if (action.id !== "org.freedesktop.systemd1.manage-units") return polkit.Result.NOT_HANDLED;
+  if (subject.user !== "@DASHBOARD_USER@") return polkit.Result.NOT_HANDLED;
+  var unit = action.lookup("unit") || "";
+  var verb = action.lookup("verb") || "";
+  if (/^nifapp@[a-z][a-z0-9-]{1,30}[a-z0-9]\.service$/.test(unit) &&
+      (verb === "start" || verb === "stop" || verb === "restart")) {
+    return polkit.Result.YES;
+  }
+  if (/^nifbuild@[a-z][a-z0-9-]{1,30}[a-z0-9]\.service$/.test(unit) && verb === "start") {
+    return polkit.Result.YES;
+  }
+  return polkit.Result.NOT_HANDLED;
+});

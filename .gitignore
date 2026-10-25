@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.next/
+out/
+coverage/
+*.log
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+config/applications.json
+
+# Hosting Manager: local dev data (registry, releases, per-app secrets)
+.hosting-dev/
+# Deployment archives (e.g. nifserver-deploy.tar.gz)
+*.tar.gz

@@ -1,0 +1,9 @@
+# Snippet to ADD to the existing /etc/cloudflared/config.yml ingress list.
+# Back up the file first. Keep the existing drive.nifserver.cloud rule unchanged,
+# and keep the catch-all `http_status:404` rule last.
+ingress:
+  # - hostname: drive.nifserver.cloud      <- existing rule, leave as-is
+  #   service: ...
+  - hostname: panel.nifserver.cloud
+    service: http://127.0.0.1:8088          # Nginx (or http://127.0.0.1:3000 without Nginx)
+  - service: http_status:404

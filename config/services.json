@@ -1,0 +1,9 @@
+{
+  "services": [
+    { "name": "netdata", "label": "Netdata", "description": "Monitoring agent and metric history" },
+    { "name": "apache2", "label": "Apache WebDAV", "description": "WebDAV file access for RaiDrive" },
+    { "name": "cloudflared", "label": "Cloudflare Tunnel", "description": "Remote access tunnel" },
+    { "name": "smbd", "label": "Samba", "description": "LAN file sharing" },
+    { "name": "ssh", "label": "SSH", "description": "Secure shell access" }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "applications": [
+    {
+      "id": "webdav",
+      "name": "WebDAV Drive",
+      "url": "https://drive.nifserver.cloud",
+      "description": "File access through RaiDrive or a WebDAV client",
+      "category": "storage",
+      "healthCheck": true
+    },
+    {
+      "id": "samba",
+      "name": "Samba Share",
+      "url": "http://nifserver.local",
+      "description": "LAN share at \\\\nifserver\\shared",
+      "category": "storage",
+      "healthCheck": false
+    },
+    {
+      "id": "netdata",
+      "name": "Netdata",
+      "url": "http://nifserver.local:19999",
+      "description": "Detailed monitoring (LAN only)",
+      "category": "monitoring",
+      "healthCheck": false
+    }
+  ]
+}

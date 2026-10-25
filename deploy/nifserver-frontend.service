@@ -1,0 +1,28 @@
+[Unit]
+Description=NIFSERVER Dashboard frontend (Next.js)
+After=network-online.target nifserver-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nifserver
+Group=nifserver
+WorkingDirectory=/opt/nifserver/frontend
+EnvironmentFile=/etc/nifserver/nifserver.env
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+ExecStart=/opt/nifserver/frontend/node_modules/.bin/next start -H 127.0.0.1 -p 3000
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/nifserver/frontend/.next/cache
+MemoryMax=384M
+
+[Install]
+WantedBy=multi-user.target

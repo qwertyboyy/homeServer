@@ -1,0 +1,59 @@
+# /etc/systemd/system/nifbuild@.service — build/fetch sandbox for hosted app %i.
+# Installed by deploy/hosting/install.sh. Started (only) by the dashboard; runs
+# builder.mjs, which reads apps/%i/build/plan.json and runs allowlisted commands.
+[Unit]
+Description=NIFSERVER build sandbox for %i
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=nifbuild
+Group=nifhost
+WorkingDirectory=/srv/nifhost/apps/%i/build
+Environment=NIFHOST_ROOT=/srv/nifhost
+ExecStart=/usr/bin/node /usr/local/lib/nifhost/builder.mjs %i
+# Private-repo token: exposed only to this unit under $CREDENTIALS_DIRECTORY.
+LoadCredential=git-token:/srv/nifhost/apps/%i/secrets/git-token
+TimeoutStartSec=30min
+UMask=0002
+Nice=10
+IOSchedulingClass=idle
+
+# Filesystem: only this app's releases and build dirs; dashboard config and secrets hidden.
+TemporaryFileSystem=/srv/nifhost:ro
+BindPaths=/srv/nifhost/apps/%i/releases /srv/nifhost/apps/%i/build
+InaccessiblePaths=-/etc/nifserver -/etc/cloudflared -/opt/nifserver -/srv/shared -/var/lib/private -/var/lib/nifhost
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Network: public internet only (npm registry, GitHub). LAN, localhost services and
+# metadata IPs are blocked at the kernel level (also defeats DNS rebinding);
+# 127.0.0.53 is systemd-resolved's stub resolver.
+IPAddressAllow=127.0.0.53/32
+IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fc00::/7
+
+# Resources: builds (Next.js especially) are the heaviest thing on a 4 GB host.
+MemoryMax=1536M
+MemorySwapMax=1G
+CPUQuota=150%
+TasksMax=512
+LimitNOFILE=8192

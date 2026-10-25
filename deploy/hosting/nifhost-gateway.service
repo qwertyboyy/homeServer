@@ -1,0 +1,47 @@
+# /etc/systemd/system/nifhost-gateway.service — serves hosted static sites and
+# reverse-proxies hosted apps by Host header. Point cloudflared (or Nginx) here.
+# Installed by deploy/hosting/install.sh. Check the port is free: ss -ltnp | grep 8090
+[Unit]
+Description=NIFSERVER hosting gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nifgw
+Group=nifgw
+Environment=NIFHOST_ROOT=/srv/nifhost
+Environment=NIFHOST_GATEWAY_PORT=8090
+ExecStart=/usr/bin/node /usr/local/lib/nifhost/gateway.mjs
+Restart=on-failure
+RestartSec=3
+
+# Reads routes.json and world-readable release files; per-app secrets/ dirs are 0700 (not readable).
+InaccessiblePaths=-/etc/nifserver -/etc/cloudflared -/opt/nifserver -/srv/shared
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressAllow=localhost
+IPAddressDeny=any
+MemoryMax=128M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
