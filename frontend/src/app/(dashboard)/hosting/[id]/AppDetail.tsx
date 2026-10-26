@@ -151,9 +151,20 @@ function Overview({ app, refresh }: Props) {
                 className={cx(inputCls, "file:mr-3 file:rounded-md file:border-0 file:bg-surface file:px-3 file:py-1 file:text-sm file:text-ink")}
               />
             </Field>
-            <Button type="submit" icon={Upload} disabled={!file || deploy.busy || busy}>
+            <Button type="submit" icon={Upload} disabled={!file || deploy.busy || busy} aria-describedby="zip-why">
               {deploy.busy ? "Mengunggah…" : file ? `Deploy ${file.name} (${bytes(file.size)})` : "Deploy ZIP"}
             </Button>
+            <p id="zip-why" className="text-xs text-muted">
+              {deploy.busy
+                ? "Sedang mengunggah…"
+                : busy
+                  ? "Tombol nonaktif: masih ada deployment yang berjalan untuk aplikasi ini."
+                  : !file
+                    ? "Tombol aktif setelah Anda memilih file .zip di atas."
+                    : file.name.toLowerCase().endsWith(".zip")
+                      ? "Siap di-deploy."
+                      : "File ini bukan .zip; server akan menolaknya."}
+            </p>
           </form>
           {app.repo && (
             <div className="mt-4 border-t border-line pt-4">
