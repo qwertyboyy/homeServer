@@ -80,7 +80,7 @@ sudo systemctl restart nifserver-backend
 curl -s http://127.0.0.1:8090/__nifhost/healthz            # ok
 ```
 
-Lalu buka **Dashboard → Hosting**; panel *Prasyarat server* harus hijau untuk bagian Inti.
+Lalu buka **Dashboard → Hosting**; panel _Prasyarat server_ harus hijau untuk bagian Inti.
 
 `install.sh` melakukan **hanya**: grup `nifhost`, user sistem `nifbuild` & `nifgw` (tanpa shell), `<user>` masuk grup
 `nifhost`, `/srv/nifhost`, skrip runtime root-owned di `/usr/local/lib/nifhost`, tiga unit systemd (backup jika ada),
@@ -109,18 +109,18 @@ sudo systemctl daemon-reload && sudo systemctl restart nifserver-backend
 ### Otomatis lewat Cloudflare API (opsional, gratis)
 
 Isi variabel `CLOUDFLARE_*` di `.env` backend lalu restart. Setelah itu, setiap domain yang ditambah/dihapus
-di dashboard (wizard *Aplikasi baru* atau tab **Domain**) otomatis:
+di dashboard (wizard _Aplikasi baru_ atau tab **Domain**) otomatis:
 
 1. membuat/menghapus record **CNAME proxied** `<domain>` → `<tunnel-id>.cfargotunnel.com` (HTTPS dari Cloudflare);
-2. jika `CLOUDFLARE_ACCOUNT_ID` diisi **dan** tunnel dikelola dari dashboard Cloudflare (*remotely-managed*),
+2. jika `CLOUDFLARE_ACCOUNT_ID` diisi **dan** tunnel dikelola dari dashboard Cloudflare (_remotely-managed_),
    menambah/menghapus rule ingress `hostname → http://127.0.0.1:8090` sebelum rule `http_status:404`.
 
-| Variabel | Isi |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | API Token (**bukan** Global API Key). Izin minimum: `Zone → DNS → Edit` pada zona domain Anda saja; tambah `Account → Cloudflare Tunnel → Edit` bila ingin ingress otomatis. |
-| `CLOUDFLARE_ZONE_ID` | Zone ID domain (Overview → kanan bawah). |
-| `CLOUDFLARE_TUNNEL_ID` | UUID tunnel (`cloudflared tunnel list`). |
-| `CLOUDFLARE_ACCOUNT_ID` | Opsional; hanya untuk tunnel remotely-managed. |
+| Variabel                | Isi                                                                                                                                                                          |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLOUDFLARE_API_TOKEN`  | API Token (**bukan** Global API Key). Izin minimum: `Zone → DNS → Edit` pada zona domain Anda saja; tambah `Account → Cloudflare Tunnel → Edit` bila ingin ingress otomatis. |
+| `CLOUDFLARE_ZONE_ID`    | Zone ID domain (Overview → kanan bawah).                                                                                                                                     |
+| `CLOUDFLARE_TUNNEL_ID`  | UUID tunnel (`cloudflared tunnel list`).                                                                                                                                     |
+| `CLOUDFLARE_ACCOUNT_ID` | Opsional; hanya untuk tunnel remotely-managed.                                                                                                                               |
 
 Perilaku & batasan:
 
@@ -129,7 +129,7 @@ Perilaku & batasan:
   Saat menghapus, hanya record yang menunjuk ke tunnel ini yang dihapus.
 - Domain di luar zona (`CLOUDFLARE_ZONE_ID`) dilewati; atur DNS-nya manual.
 - Kegagalan Cloudflare **tidak** membatalkan penyimpanan domain; hasilnya tampil di tab Domain, dicatat di audit,
-  dan bisa dicoba lagi dengan tombol *Sinkronkan ke Cloudflare*.
+  dan bisa dicoba lagi dengan tombol _Sinkronkan ke Cloudflare_.
 - Tunnel yang memakai `config.yml` lokal (seperti `/etc/cloudflared/config.yml`) tidak bisa diubah lewat API.
   Cukup sekali pasang rule wildcard — mis. `hostname: "*.nifserver.cloud"` → `http://127.0.0.1:8090` **di bawah**
   rule `drive.`/`panel.` dan di atas `http_status:404` — maka DNS tiap aplikasi baru sudah otomatis dan ingress tidak
@@ -190,8 +190,8 @@ dengan `proxy_set_header Host $host;` — gateway hanya bind ke loopback.
 
 ## Repo GitHub privat (aplikasi yang di-host)
 
-Buat **fine-grained personal access token** di GitHub: *Repository access* = repo itu saja, *Permissions* →
-*Contents: Read-only*. Simpan di tab **Pengaturan → Token deploy GitHub**. Token disimpan 0600, diberikan ke unit build
+Buat **fine-grained personal access token** di GitHub: _Repository access_ = repo itu saja, _Permissions_ →
+_Contents: Read-only_. Simpan di tab **Pengaturan → Token deploy GitHub**. Token disimpan 0600, diberikan ke unit build
 sebagai systemd credential, dikirim ke git sebagai header HTTP lewat environment (tidak di argv/URL/log), dan tidak
 pernah dikembalikan oleh API. Ganti/hapus kapan saja dari halaman yang sama.
 
@@ -214,14 +214,13 @@ perlindungan replay, dan manajemen secret — sengaja ditunda). Deploy dipicu ma
 
 ## Troubleshooting
 
-| Gejala | Periksa |
-|---|---|
-| Deploy gagal "Builder tidak menghasilkan result.json" | `journalctl -u nifbuild@<id> -n 50`; prasyarat unit/polkit |
-| Aksi start/stop "gagal" | rule polkit terpasang? `pkcheck`/`journalctl -u polkit`; user backend sesuai `install.sh <user>` |
-| Health check gagal | `journalctl -u nifapp@<id>`; health path benar? app listen di `$PORT` & `127.0.0.1`? |
-| Situs 404 di domain | rule ingress cloudflared ke `:8090`; `curl -H 'Host: <domain>' http://127.0.0.1:8090/` |
-| Next.js kehabisan memori saat build | tutup app lain atau naikkan `MemoryMax` via `sudo systemctl edit nifbuild@<id>` |
-
+| Gejala                                                | Periksa                                                                                          |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Deploy gagal "Builder tidak menghasilkan result.json" | `journalctl -u nifbuild@<id> -n 50`; prasyarat unit/polkit                                       |
+| Aksi start/stop "gagal"                               | rule polkit terpasang? `pkcheck`/`journalctl -u polkit`; user backend sesuai `install.sh <user>` |
+| Health check gagal                                    | `journalctl -u nifapp@<id>`; health path benar? app listen di `$PORT` & `127.0.0.1`?             |
+| Situs 404 di domain                                   | rule ingress cloudflared ke `:8090`; `curl -H 'Host: <domain>' http://127.0.0.1:8090/`           |
+| Next.js kehabisan memori saat build                   | tutup app lain atau naikkan `MemoryMax` via `sudo systemctl edit nifbuild@<id>`                  |
 
 ## Database MySQL terkelola dan migrasi Laravel
 
@@ -283,7 +282,6 @@ harus dikelola manual karena secret aplikasi ikut dihapus.
 
 Referensi: https://dev.mysql.com/doc/refman/8.4/en/grant.html dan
 https://dev.mysql.com/doc/refman/8.4/en/partial-revokes.html.
-
 
 ## Akses phpMyAdmin
 

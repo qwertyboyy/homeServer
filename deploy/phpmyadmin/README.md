@@ -1,91 +1,113 @@
-# phpMyAdmin melalui dashboard (Ubuntu 24.04)
+# Setup Apache + phpMyAdmin ? Ubuntu 24.04
 
-Akses: `https://panel.nifserver.cloud/phpmyadmin/` melalui Nginx dashboard, bukan
-subdomain database tersendiri. Cloudflare Tunnel harus mengarah ke Nginx panel
-(port 8088), bukan langsung ke Next.js 3000. Kebijakan Cloudflare Access pada
-hostname panel juga melindungi path ini bila cakupannya seluruh hostname.
+Untuk server dengan Apache/WebDAV aktif di `127.0.0.1:8080`, Next.js dashboard
+pada port 3000, API pada 3001, dan Cloudflare Tunnel langsung ke 3000.
+Installer default sekarang memakai **Apache**, tanpa memasang Nginx.
 
-## Pasang setelah update kode dashboard
+## Jalankan setelah commit/push perubahan ini
+
+Di server:
 
 ```bash
 sudo bash /opt/nifserver/deploy/update-nifserver.sh
 sudo bash /opt/nifserver/deploy/phpmyadmin/install.sh
 ```
 
-Argumen opsional adalah path konfigurasi Nginx panel yang sebenarnya:
+Installer harus menampilkan selesai. Jika gagal, jangan ubah Service URL tunnel;
+kirim pesan error tanpa cookie, password atau key. Installer menolak konflik port
+8088 dan alias phpMyAdmin global yang dapat membuka pintu masuk di luar panel.
 
-```bash
-sudo bash /opt/nifserver/deploy/phpmyadmin/install.sh /etc/nginx/sites-available/nifserver-panel
-```
+Installer memasang phpMyAdmin dan PHP 8.3 FPM melalui apt, menambahkan
+`/etc/apache2/conf-available/nifserver-panel.conf`, lalu mengaktifkan modul proxy,
+proxy_http, proxy_fcgi, rewrite, headers, setenvif, alias, dir, env. Handler PHP hanya
+dipakai dalam vhost panel. Tidak mengganti `webdav.conf`, `000-default.conf`, port
+8080, atau konfigurasi tunnel. Apache di-reload agar vhost tambahan berlaku.
+Backup file yang diubah ada di `/var/backups/nifserver-phpmyadmin/*-apache/`.
+Jika validasi/configtest/smoke test gagal, file yang ditargetkan dipulihkan. Paket,
+modul yang telah diaktifkan, dan folder sesi PHP tetap terpasang.
 
-Installer untuk Ubuntu 24.04 memasang phpMyAdmin dari apt, PHP 8.3 FPM dan extension,
-tanpa konfigurasi Apache/dbconfig. Installer memasang vhost loopback 127.0.0.1:8091,
-menambahkan include ke blok server panel, menyiapkan key bridge, mengaktifkan env,
-memvalidasi PHP/Nginx, restart backend dan reload Nginx. Port 8091 harus tersedia.
-Panel harus memakai `$nif_forwarded_proto` seperti `deploy/nginx-nifserver.conf`.
-Backup panel/env ada di `/var/backups/nifserver-phpmyadmin/` (root-only).
-Tidak perlu membuka port firewall atau menambahkan DNS baru.
-
-Jika alias phpMyAdmin Apache sudah aktif, installer berhenti; nonaktifkan alias
-tersebut agar tidak ada pintu masuk lain di luar pemeriksaan sesi dashboard:
+Jika installer mendeteksi alias phpMyAdmin global, nonaktifkan alias itu dahulu:
 
 ```bash
 sudo a2disconf phpmyadmin
+sudo apache2ctl configtest
 sudo systemctl reload apache2
 ```
 
-Jangan menyalin konfigurasi Nginx panel secara keseluruhan untuk mengganti konfigurasi
-lokal: installer hanya menambahkan include. Jika terdapat beberapa blok server dalam
-file panel, periksa bahwa include dipasang pada blok yang dipakai untuk dashboard.
-
-## Pemakaian
-
-Login ulang dashboard setelah restart backend. Buka Hosting ? aplikasi ? Database ?
-**Buka phpMyAdmin**. Hanya database MySQL terkelola (dibuat dashboard) yang didukung.
-Database manual tidak boleh dipakai untuk menyelundupkan akun root/admin.
-Tombol melakukan signon sebagai user aplikasi. PHP meminta password melalui loopback
-ke API memakai sesi dashboard dan key bridge; password tidak berada dalam URL,
-HTML, JavaScript, respons API yang dapat diakses browser, atau log akses.
-Sesi signon disimpan server-side oleh PHP. Setiap request phpMyAdmin, termasuk aset
-dan impor/ekspor, memeriksa sesi dashboard melalui Nginx auth_request.
-Logout atau kedaluwarsa sesi dashboard memblokir request berikutnya. Halaman yang
-sudah terbuka harus ditutup bila selesai. Backend restart mengharuskan login ulang.
-
-Saat membuka aplikasi lain, sesi phpMyAdmin tab sebelumnya juga berganti akun:
-satu akun aktif per browser. Periksa nama database sebelum menjalankan SQL.
-Setelah reset password database, buka kembali phpMyAdmin dari dashboard.
-Batas impor 32 MB di Nginx; PHP bisa menerapkan batas lebih kecil. Ubah
-`upload_max_filesize` dan `post_max_size` di `/etc/php/8.3/fpm/php.ini` jika diperlukan,
-lalu reload php8.3-fpm. Tidak ada akses ke kredensial nifhost_admin melalui bridge.
-
-Key bridge: `/etc/phpmyadmin/nifhost-bridge.key` (root:www-data 0640), disalin installer
-ke `PHPMYADMIN_BRIDGE_KEY` di `/etc/nifserver/nifserver.env`. Semua proses PHP yang
-berjalan sebagai www-data berada dalam boundary kepercayaan bridge ini. Hosted apps
-harus tetap memakai user systemd terisolasi. Jangan menjalankan kode tidak terpercaya
-sebagai www-data. Key saja tidak cukup: endpoint API juga memerlukan sesi dashboard.
-
-## Verifikasi di server
+## Verifikasi sebelum mengubah Cloudflare
 
 ```bash
-sudo nginx -t
-systemctl is-active php8.3-fpm nifserver-backend nginx
-curl -I http://127.0.0.1:8091/phpmyadmin/
+sudo apache2ctl configtest
+curl -I http://127.0.0.1:8088/login
+curl http://127.0.0.1:8088/api/v1/health
 curl -I http://127.0.0.1:8088/phpmyadmin/
 ```
 
-Kedua curl tanpa cookie harus menghasilkan **401**. Setelah login, tombol harus
-membuka database aplikasi yang tepat. Uji buat tabel sementara, ekspor, lalu hapus
-tabelnya; logout dashboard lalu refresh phpMyAdmin harus ditolak. Jangan kirim cookie,
-password atau bridge key ke chat.
+Hasil: login 200, health JSON sukses, phpMyAdmin **401** tanpa cookie dashboard.
+Installer juga memeriksa PHP, signon, dan aset statis menolak akses tanpa cookie.
+Lalu di Cloudflare Tunnel, pada hostname dashboard yang sudah ada, ubah:
 
-Jika 404 dari tombol: periksa target tunnel dan include Nginx. Jika 502: periksa
-`systemctl status php8.3-fpm` dan socket `/run/php/php8.3-fpm.sock`. Jika akses signon
-ditolak: cek env aktif, login ulang, dan pastikan database dikelola dashboard.
+```text
+Service URL lama: http://127.0.0.1:3000
+Service URL baru: http://127.0.0.1:8088
+```
 
-Untuk menonaktifkan: set `PHPMYADMIN_ENABLED=false`, restart backend, hapus include
-phpMyAdmin dari blok panel dan hapus `/etc/nginx/conf.d/nifhost-phpmyadmin.conf`,
-kemudian `sudo nginx -t` dan reload Nginx. Jangan hapus database aplikasi.
+Tidak perlu DNS baru, port publik baru, atau perubahan hostname WebDAV. Port 8088
+hanya mendengarkan loopback. Jika perlu mengembalikan jalur dashboard, arahkan
+Service URL ke 3000; phpMyAdmin akan tidak tersedia melalui jalur tersebut.
 
-Referensi implementasi signon:
-https://docs.phpmyadmin.net/en/latest/config.html#cfg_Servers_SignonSession
-https://github.com/phpmyadmin/phpmyadmin/blob/RELEASE_5_2_2/examples/signon.php
+## Menu dan alur akses
+
+Login ulang setelah backend restart. Buka **Hosting ? nama aplikasi ? Database**.
+Buat database MySQL melalui dashboard bila belum ada, lalu klik **Buka phpMyAdmin**.
+URL tetap pada domain dashboard, misalnya `/phpmyadmin/`. Database manual belum
+didukung untuk mencegah pemakaian akun root/admin melalui bridge.
+
+Apache memeriksa sesi dashboard pada setiap request phpMyAdmin memakai RewriteMap
+program Python yang berjalan sebagai www-data. Program meminta `/api/v1/auth/me`
+melalui loopback dan hanya menerima status 200; tanpa cache, timeout/error ditolak.
+Program map menserialkan pemeriksaan sesi, sesuai untuk panel admin kecil. Bila
+backend tidak merespons, pemeriksaan dibatasi timeout 2 detik.
+
+Signon PHP meminta akun/password aplikasi melalui endpoint backend yang memerlukan
+sesi dashboard **dan** key bridge. Password tidak diberikan kepada browser. Sesi
+phpMyAdmin disimpan di `/var/lib/phpmyadmin/nifhost-sessions` (www-data 0700).
+Key di `/etc/phpmyadmin/nifhost-bridge.key` (root:www-data 0640), dan salinannya di
+`PHPMYADMIN_BRIDGE_KEY` dalam `/etc/nifserver/nifserver.env`. Jangan menjalankan kode
+aplikasi tidak terpercaya sebagai www-data; hosted apps memakai user systemd
+terisolasi. User database tetap dibatasi hak MySQL per aplikasi.
+
+Logout dashboard atau sesi kedaluwarsa menolak request phpMyAdmin berikutnya.
+Membuka aplikasi lain mengganti akun phpMyAdmin pada browser yang sama: periksa
+nama database sebelum menjalankan SQL. Setelah reset password, buka lagi dari tab
+Database. Batas impor Apache 32 MB; PHP dapat menerapkan batas lebih rendah melalui
+`upload_max_filesize`/`post_max_size` di `/etc/php/8.3/fpm/php.ini`.
+
+## Troubleshooting
+
+- 404 dari domain panel: pastikan tunnel menuju **8088**, bukan 3000.
+- 401: login ulang dashboard pada hostname yang sama, kemudian buka dari tab Database.
+- 403 saat signon: cek database terkelola, env aktif, dan key bridge; jangan kirim key.
+- 503 pada PHP: `systemctl status php8.3-fpm` dan socket `/run/php/php8.3-fpm.sock`.
+- Log: `sudo tail -n 50 /var/log/apache2/nifserver-panel-error.log`.
+- AH00558 tentang ServerName global bukan penyebab 404; vhost baru memiliki ServerName.
+
+Nonaktifkan akses: set `PHPMYADMIN_ENABLED=false`, restart backend, jalankan
+`sudo a2disconf nifserver-panel`, configtest lalu reload Apache. Kembalikan tunnel
+ke port 3000 terlebih dahulu agar dashboard tetap dapat diakses.
+
+Untuk server yang memang menggunakan Nginx, installer lama tetap tersedia sebagai
+`install-nginx.sh`, dengan petunjuk di [README-nginx.md](README-nginx.md).
+
+## Validasi lokal
+
+```bash
+python -m unittest discover -s deploy/phpmyadmin/tests -v
+bash -n deploy/phpmyadmin/install.sh
+php -l deploy/phpmyadmin/signon.php
+php -l deploy/phpmyadmin/config.inc.php
+```
+
+Validasi apt, PHP-FPM dan configtest final dilakukan installer pada Ubuntu server.
+Referensi Apache: https://httpd.apache.org/docs/2.4/rewrite/rewritemap.html dan
+https://httpd.apache.org/docs/2.4/mod/mod_proxy.html#proxypass.
