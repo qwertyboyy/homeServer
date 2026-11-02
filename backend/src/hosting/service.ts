@@ -288,6 +288,7 @@ export class HostingService {
       env: app.env.map((e) => ({ key: e.key, secret: e.secret, value: e.secret ? null : e.value, set: e.secret ? e.key in secrets.env : true })),
       database: app.database,
       gitTokenSet: app.gitTokenSet,
+      phpMyAdminAvailable: this.deps.env.PHPMYADMIN_ENABLED && !!this.deps.env.PHPMYADMIN_BRIDGE_KEY && app.database.type === "mysql" && app.database.managed,
     };
   }
 
@@ -541,6 +542,20 @@ export class HostingService {
     await this.secrets.write(updated, { ...current, dbPassword: password });
     await this.audit.record(actor, "database.update", id, `Database diatur: ${body.type}${server ? ` (${database.name}@${database.host})` : ""}`);
     return this.getApp(id);
+  }
+
+  /** Server-to-server only: route also requires dashboard session and bridge key. */
+  async phpMyAdminCredentials(id: string, actor: string) {
+    if (!this.deps.env.PHPMYADMIN_ENABLED) throw new HostingError(404, "phpMyAdmin belum diaktifkan");
+    const app = this.requireApp(id);
+    const db = app.database;
+    if (db.type !== "mysql" || !db.managed || db.user !== managedName(id) || db.name !== managedName(id) || db.host !== "127.0.0.1" || db.port !== 3306) {
+      throw new HostingError(400, "phpMyAdmin tersedia untuk database MySQL yang dibuat dashboard");
+    }
+    const { dbPassword } = await this.secrets.read(id);
+    if (!dbPassword) throw new HostingError(409, "Password database belum tersedia");
+    await this.audit.record(actor, "database.phpmyadmin", id, "phpMyAdmin dibuka dengan akun database aplikasi");
+    return { user: db.user, password: dbPassword, host: db.host, port: db.port, database: db.name };
   }
 
   async managedDatabase(id: string, operation: "create" | "reset" | "delete", actor: string) {

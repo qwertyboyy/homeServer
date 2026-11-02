@@ -757,6 +757,8 @@ function DatabaseTab({ app, refresh }: Props) {
       <Card>
         <CardTitle icon={Database} title="Database aplikasi" />
         <div className="my-3 flex flex-wrap gap-2">
+          {app.phpMyAdminAvailable && <a href={`/phpmyadmin/nifhost-signon.php?app=${encodeURIComponent(app.id)}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center rounded-lg bg-primary px-3 py-2 text-sm font-medium text-white">Buka phpMyAdmin</a>}
+
           {db.type === "none" && <Button disabled={save.busy} onClick={async () => {
             if (await save.run(() => api(`/hosting/apps/${app.id}/database/create`, { method: "POST", json: {} }))) refresh();
           }}>Buat database MySQL</Button>}
@@ -772,6 +774,7 @@ function DatabaseTab({ app, refresh }: Props) {
           }}>Migrate Laravel</Button>}
         </div>
 
+        {db.type === "mysql" && !app.phpMyAdminAvailable && <p className="mb-3 text-sm text-muted">{db.managed ? "Akses phpMyAdmin belum diaktifkan di server." : "Akses phpMyAdmin dari dashboard tersedia untuk database MySQL yang dibuat dashboard."}</p>}
         <form onSubmit={submit} className="space-y-3">
           <Field label="Jenis" htmlFor="db-type">
             <select id="db-type" value={type} onChange={(e) => setType(e.target.value as typeof type)} className={inputCls}>

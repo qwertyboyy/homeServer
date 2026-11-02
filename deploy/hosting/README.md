@@ -283,3 +283,9 @@ harus dikelola manual karena secret aplikasi ikut dihapus.
 
 Referensi: https://dev.mysql.com/doc/refman/8.4/en/grant.html dan
 https://dev.mysql.com/doc/refman/8.4/en/partial-revokes.html.
+
+
+## Akses phpMyAdmin
+
+Tombol phpMyAdmin untuk database MySQL terkelola dan instalasi server dijelaskan di
+[../phpmyadmin/README.md](../phpmyadmin/README.md). Akses memerlukan login dashboard.

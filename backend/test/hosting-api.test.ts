@@ -1007,3 +1007,36 @@ it("runs Laravel migrations before activation and preserves the active release o
   migration.mockResolvedValue({ started: true, detail: null });
   await request(c.app).post("/api/v1/hosting/apps/migrate-app/database/migrate").set("Cookie", c.cookie).send({ confirm: "migrate-app" }).expect(200);
 });
+
+
+describe("phpMyAdmin bridge", () => {
+  it("requires both dashboard login and bridge key, and sends only the app credentials", async () => {
+    const key = "a".repeat(64);
+    const c = await setup({ PHPMYADMIN_ENABLED: "true", PHPMYADMIN_BRIDGE_KEY: key });
+    await create(c, { id: "pma-app", name: "PMA", runtime: "laravel", deployMethod: "upload" }).expect(201);
+    const sql = vi.spyOn(MysqlAdmin.prototype, "run").mockResolvedValue();
+    try { await c.service.managedDatabase("pma-app", "create", "test"); } finally { sql.mockRestore(); }
+    const url = "/api/v1/hosting/apps/pma-app/database/phpmyadmin-credentials";
+    await request(c.app).post(url).set("X-Nif-Pma-Key", key).send({}).expect(401);
+    await request(c.app).post(url).set("Cookie", c.cookie).send({}).expect(403);
+    await request(c.app).post(url).set("Cookie", c.cookie).set("X-Nif-Pma-Key", "wrong").send({}).expect(403);
+    const secret = (await c.service.secrets.read("pma-app")).dbPassword;
+    const detail = await getApp(c, "pma-app");
+    expect(detail.phpMyAdminAvailable).toBe(true);
+    expect(JSON.stringify(detail)).not.toContain(secret);
+    const result = await request(c.app).post(url).set("Cookie", c.cookie).set("X-Nif-Pma-Key", key).send({}).expect(200);
+    expect(result.headers["cache-control"]).toBe("no-store");
+    expect(result.body.data).toEqual({ user: managedName("pma-app"), password: secret, host: "127.0.0.1", port: 3306, database: managedName("pma-app") });
+    await request(c.app).post("/api/v1/auth/logout").set("Cookie", c.cookie).send({}).expect(200);
+    await request(c.app).post(url).set("Cookie", c.cookie).set("X-Nif-Pma-Key", key).send({}).expect(401);
+  });
+  it("rejects manual accounts and stays disabled by default", async () => {
+    const c = await setup({ PHPMYADMIN_ENABLED: "true", PHPMYADMIN_BRIDGE_KEY: "b".repeat(64) });
+    await create(c, { id: "manual-pma", name: "Manual", runtime: "node", deployMethod: "upload" }).expect(201);
+    await c.service.setDatabase("manual-pma", { type: "mysql", user: "root", name: "mysql", password: "not-exportable" }, "test");
+    expect((await getApp(c, "manual-pma")).phpMyAdminAvailable).toBe(false);
+    await request(c.app).post("/api/v1/hosting/apps/manual-pma/database/phpmyadmin-credentials").set("Cookie", c.cookie).set("X-Nif-Pma-Key", "b".repeat(64)).send({}).expect(400);
+    const off = await setup();
+    await request(off.app).post("/api/v1/hosting/apps/manual-pma/database/phpmyadmin-credentials").set("Cookie", off.cookie).set("X-Nif-Pma-Key", "b".repeat(64)).send({}).expect(404);
+  });
+});

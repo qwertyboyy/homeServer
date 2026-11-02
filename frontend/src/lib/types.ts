@@ -147,6 +147,7 @@ export interface HostedApp {
 }
 
 export interface HostedAppDetail extends HostedApp {
+  phpMyAdminAvailable: boolean;
   internalHost: string;
   buildSteps: string[];
   releases: ReleaseRecord[];

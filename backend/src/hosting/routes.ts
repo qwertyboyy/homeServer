@@ -189,6 +189,16 @@ export function hostingRouter(service: HostingService, env: Env) {
   router.get("/apps/:id/domains/status", handle(async (req, res) => ok(res, await service.domainStatus(appId(req)))));
   router.put("/apps/:id/env", handle(async (req, res) => ok(res, await service.setEnv(appId(req), parse(EnvBody, req.body), actor(req)))));
   router.put("/apps/:id/database", handle(async (req, res) => ok(res, await service.setDatabase(appId(req), parse(DatabaseBody, req.body), actor(req)))));
+  router.post("/apps/:id/database/phpmyadmin-credentials", handle(async (req, res) => {
+    const expected = env.PHPMYADMIN_BRIDGE_KEY;
+    const provided = req.get("X-Nif-Pma-Key") ?? "";
+    if (!env.PHPMYADMIN_ENABLED || !expected) throw new HostingError(404, "phpMyAdmin belum diaktifkan");
+    // Local transport alone is insufficient: reverse proxies also run on loopback.
+    if (!crypto.timingSafeEqual(crypto.createHash("sha256").update(provided).digest(), crypto.createHash("sha256").update(expected).digest())) {
+      throw new HostingError(403, "Akses khusus bridge phpMyAdmin");
+    }
+    ok(res, await service.phpMyAdminCredentials(appId(req), actor(req)));
+  }));
   for (const operation of ["create", "reset", "delete"] as const) {
     router.post(`/apps/:id/database/${operation}`, handle(async (req, res) => {
       const id = appId(req);

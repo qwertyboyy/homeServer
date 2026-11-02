@@ -51,6 +51,8 @@ const EnvSchema = z.object({
   HOSTING_RESERVED_HOSTS: z.string().default("drive.nifserver.cloud,panel.nifserver.cloud"),
   HOSTING_BASE_DOMAIN: z.string().default(""),
   HOSTING_CLOUDFLARED_CONFIG: z.string().default("/etc/cloudflared/config.yml"),
+  PHPMYADMIN_ENABLED: bool.default(false),
+  PHPMYADMIN_BRIDGE_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/)),
   HOSTING_MYSQL_DEFAULTS_FILE: z.string().default(""),
   HOSTING_RUNTIME_DIR: z.string().default("/usr/local/lib/nifhost"),
 
