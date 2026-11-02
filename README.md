@@ -45,7 +45,8 @@ Format respons: `{ "data": ..., "timestamp": "...", "error": null }`
 | `POST /hosting/apps/:id/deploy/upload` (`application/zip`) · `.../deploy/github` | ✔ | deploy (202, berjalan di latar) |
 | `POST /hosting/apps/:id/uploads` → `PUT .../uploads/:uploadId/file?path=` (`application/octet-stream`) → `POST .../uploads/:uploadId/commit` · `DELETE .../uploads/:uploadId` | ✔ | upload file/folder Website statis tanpa ZIP; validasi `index.html` sebelum rilis dibuat (commit → 202) |
 | `POST /hosting/apps/:id/rollback` · `.../actions` (`start\|stop\|restart`) | ✔ | rollback rilis, aksi service (stop: `{confirm: id}`) |
-| `GET /hosting/overview` | ✔ | base domain + status integrasi Cloudflare (untuk wizard) |
+| `GET /hosting/overview` | ✔ | base domain + status integrasi Cloudflare/Caddy (untuk wizard) |
+| `GET /caddy/ask?token=&domain=` | token | hook Caddy on-demand TLS: 200 hanya untuk domain aplikasi terdaftar, selain itu 404 (nonaktif tanpa `CADDY_ASK_TOKEN`) |
 | `PUT /hosting/apps/:id/{domains,env,database,git-token}` · `GET .../domains/status` · `POST .../domains/sync` | ✔ | domain (sinkron DNS Cloudflare bila dikonfigurasi), env (secret tidak pernah dikembalikan), database, token deploy |
 | `GET /hosting/apps/:id/deployments/:did/log` | ✔ | log deployment yang disanitasi |
 

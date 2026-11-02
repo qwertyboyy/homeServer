@@ -18,7 +18,7 @@ export interface UnitState {
 export const GATEWAY_UNIT = "nifhost-gateway.service";
 
 // The only units the Hosting Manager may ever address. Matches the polkit rule in deploy/hosting.
-const MANAGED_UNIT = /^(?:(?:nifapp|nifbuild)@[a-z][a-z0-9-]{1,30}[a-z0-9]\.service|nifhost-gateway\.service)$/;
+const MANAGED_UNIT = /^(?:(?:nifapp|nifbuild|nifmigrate)@[a-z][a-z0-9-]{1,30}[a-z0-9]\.service|nifhost-gateway\.service)$/;
 
 export function unitName(kind: "app" | "build", appId: string) {
   if (!APP_ID_RE.test(appId)) throw new Error("invalid app id");
@@ -38,6 +38,7 @@ export function assertManagedUnit(name: string) {
 export interface HostExecutor {
   readonly kind: "systemd" | "simulated";
   /** Runs nifbuild@<id> (plan.json already written). Resolves once it exits. */
+  runMigration?(appId: string): Promise<{ started: boolean; detail: string | null }>;
   runBuilder(appId: string): Promise<{ started: boolean; detail: string | null }>;
   unitAction(appId: string, action: UnitAction): Promise<void>;
   unitStates(appIds: string[]): Promise<Map<string, UnitState>>;
@@ -81,6 +82,12 @@ export class SystemdExecutor implements HostExecutor {
     const argv = ["--no-ask-password", ...args, "--", assertManagedUnit(unit)];
     this.calls.push(argv);
     return this.exec("systemctl", argv, timeoutMs);
+  }
+
+  async runMigration(appId: string) {
+    if (!APP_ID_RE.test(appId)) throw new Error("invalid app id");
+    const r = await this.systemctl(["start"], `nifmigrate@${appId}.service`, 10 * 60_000);
+    return { started: true, detail: r.code === 0 ? null : "migration failed" };
   }
 
   async runBuilder(appId: string) {

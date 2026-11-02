@@ -1,0 +1,30 @@
+# /etc/caddy/Caddyfile — HTTPS otomatis untuk situs yang di-host NIFSERVER (tanpa Cloudflare).
+# Panduan: deploy/caddy/README.md. Ganti dua nilai bertanda GANTI, lalu `sudo systemctl reload caddy`.
+#
+# Caddy hanya meminta sertifikat untuk domain yang disetujui dashboard (endpoint `ask`),
+# yaitu domain milik aplikasi yang terdaftar. Nama acak dari internet ditolak.
+{
+	# Dipakai Let's Encrypt untuk pemberitahuan sertifikat akan habis.
+	email GANTI@email-anda.com
+
+	on_demand_tls {
+		# Token = nilai CADDY_ASK_TOKEN di /etc/nifserver/nifserver.env (openssl rand -hex 24).
+		# Backend ini hanya mendengarkan di 127.0.0.1; permintaan tidak keluar dari server.
+		ask http://127.0.0.1:3001/api/v1/caddy/ask?token=GANTI_DENGAN_CADDY_ASK_TOKEN
+	}
+}
+
+# Semua nama host yang disetujui dashboard -> gateway hosting (HOSTING_GATEWAY_PORT, bawaan 8090).
+# Host asli diteruskan apa adanya; gateway memilih aplikasi berdasarkan Host.
+:443 {
+	tls {
+		on_demand
+	}
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8090
+}
+
+# HTTP -> HTTPS. Tantangan ACME (port 80) dijawab Caddy sebelum aturan ini.
+:80 {
+	redir https://{host}{uri} permanent
+}

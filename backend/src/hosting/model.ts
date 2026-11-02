@@ -99,6 +99,8 @@ export const DbConfig = z.object({
   name: z.string().nullable(),
   user: z.string().nullable(),
   passwordSet: z.boolean(),
+  managed: z.boolean().default(false),
+  autoMigrate: z.boolean().default(false),
 });
 export type DbConfig = z.infer<typeof DbConfig>;
 
@@ -213,6 +215,7 @@ export const DatabaseBody = z
     port: z.number().int().min(1).max(65535).optional(),
     name: z.string().regex(/^[A-Za-z0-9_]{1,64}$/).optional(),
     user: z.string().regex(/^[A-Za-z0-9_]{1,32}$/).optional(),
+    autoMigrate: z.boolean().optional(),
     password: EnvValue.optional(), // omit to keep the stored one
   })
   .strict();
@@ -226,7 +229,7 @@ export const ActionBody = z
   .strict();
 
 export const RollbackBody = z.object({ releaseId: z.string().regex(RELEASE_ID_RE) }).strict();
-export const DeleteBody = z.object({ confirm: z.string() }).strict();
+export const DeleteBody = z.object({ confirm: z.string(), deleteDatabase: z.boolean().optional() }).strict();
 export const GithubDeployBody = z.object({}).strict();
 
 export function newId(prefix: "r" | "d") {

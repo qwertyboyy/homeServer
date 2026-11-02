@@ -13,6 +13,7 @@ StartLimitBurst=5
 Type=simple
 # Unique throw-away UID per app: apps cannot read each other's files, env, or processes.
 DynamicUser=yes
+User=nifapp-%i
 StateDirectory=nifhost/%i
 WorkingDirectory=/srv/nifhost/apps/%i
 # Read by systemd (root) before dropping privileges; the app cannot open these files.

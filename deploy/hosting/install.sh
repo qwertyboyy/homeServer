@@ -44,10 +44,10 @@ install -d -o "$DASH_USER" -g nifhost -m 2775 "$ROOT" "$ROOT/apps"
 echo "==> runtime scripts -> $LIB (root-owned, read-only for everyone else)"
 install -d -o root -g root -m 755 "$LIB"
 install -o root -g root -m 644 "$REPO/backend/runtime/builder.mjs" "$REPO/backend/runtime/gateway.mjs" "$REPO/backend/runtime/router.php" "$LIB/"
-install -o root -g root -m 755 "$REPO/backend/runtime/nifapp-run" "$LIB/"
+install -o root -g root -m 755 "$REPO/backend/runtime/nifapp-run" "$REPO/backend/runtime/nifmigrate-run" "$LIB/"
 
 echo "==> systemd units"
-for unit in nifapp@.service nifbuild@.service nifhost-gateway.service; do
+for unit in nifapp@.service nifmigrate@.service nifbuild@.service nifhost-gateway.service; do
   if [ -f "/etc/systemd/system/$unit" ] && ! cmp -s "$HERE/$unit" "/etc/systemd/system/$unit"; then
     cp -a "/etc/systemd/system/$unit" "/etc/systemd/system/$unit.bak-$STAMP"
   fi

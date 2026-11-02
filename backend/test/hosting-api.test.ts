@@ -1,3 +1,4 @@
+import { MysqlAdmin, managedName } from "../src/hosting/mysql.js";
 import fs from "node:fs/promises";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -5,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import bcrypt from "bcryptjs";
 import request from "supertest";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { loadEnv } from "../src/config/env.js";
 import type { CloudflareClient } from "../src/hosting/cloudflare.js";
@@ -607,6 +608,15 @@ describe("hosting: static site upload without ZIP", () => {
     expect(await releaseFile(c, id, "index.html")).toBe("<h1>home</h1>");
   });
 
+  it("serves the only HTML page among several loose files as index.html", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const { res } = await stageAndCommit(c, id, { "home.html": "<h1>home</h1>", "style.css": "body{}" });
+    expect(res.status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("<h1>home</h1>");
+    expect(await releaseFile(c, id, "style.css")).toBe("body{}");
+  });
+
   it("keeps relative structure for several files", async () => {
     const c = await setup();
     const id = await staticApp(c);
@@ -770,6 +780,31 @@ describe("hosting: static site ZIP document root", () => {
     expect(await releaseFile(c, id, "css/a.css")).toBe("c");
   });
 
+  it("serves the only HTML page of a ZIP as index.html, with its assets", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    expect((await zipDeploy(c, id, [{ name: "Home Page.html", data: "<h1>hi</h1>" }, { name: "css/a.css", data: "c" }])).status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("<h1>hi</h1>");
+    expect(await releaseFile(c, id, "css/a.css")).toBe("c");
+    expect((await getApp(c, id)).deployments[0].status).toBe("succeeded");
+  });
+
+  it("promotes the only HTML page inside a wrapper folder", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    expect((await zipDeploy(c, id, [{ name: "site/home.html", data: "<h1>in folder</h1>" }, { name: "site/js/a.js", data: "1" }])).status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("<h1>in folder</h1>");
+    expect(await releaseFile(c, id, "js/a.js")).toBe("1");
+  });
+
+  it("rejects a ZIP with several HTML pages and no index.html", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const res = await zipDeploy(c, id, [{ name: "a.html", data: "a" }, { name: "b.html", data: "b" }]);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/index\.html/);
+  });
+
   it("strips a single wrapper folder", async () => {
     const c = await setup();
     const id = await staticApp(c);
@@ -812,7 +847,7 @@ describe("hosting: static site ZIP document root", () => {
     const id = await staticApp(c);
     await deploy(c, id, site("live"));
     const before = (await getApp(c, id)).activeRelease.id;
-    const res = await zipDeploy(c, id, [{ name: "about.html", data: "a" }, { name: "css/a.css", data: "c" }]);
+    const res = await zipDeploy(c, id, [{ name: "about.html", data: "a" }, { name: "contact.html", data: "b" }, { name: "css/a.css", data: "c" }]);
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/index\.html tidak ditemukan/);
     const after = await getApp(c, id);
@@ -875,4 +910,100 @@ describe("cloudflare domain sync", () => {
     const c = await setup();
     await request(c.app).post("/api/v1/hosting/apps/web/domains/sync").send({}).expect(401);
   });
+});
+
+describe("caddy on-demand TLS ask hook", () => {
+  const TOKEN = "k3y_" + "a".repeat(30);
+  const ask = (c: Ctx, query: string) => request(c.app).get(`/api/v1/caddy/ask?${query}`); // no session cookie: Caddy has none
+
+  it("approves only domains of registered apps, and only with the shared secret", async () => {
+    const c = await setup({ CADDY_ASK_TOKEN: TOKEN });
+    await create(c, { id: "web", name: "Web", runtime: "static", deployMethod: "upload", domains: ["web.example.com"] }).expect(201);
+
+    await ask(c, `token=${TOKEN}&domain=web.example.com`).expect(200);
+    await ask(c, `token=${TOKEN}&domain=WEB.example.com`).expect(200); // Caddy may send any case
+    await ask(c, `token=${TOKEN}&domain=other.example.com`).expect(404);
+    await ask(c, `token=${TOKEN}&domain=drive.nifserver.cloud`).expect(404); // reserved
+    await ask(c, `token=${TOKEN}&domain=web.nifhost.internal`).expect(404);
+    await ask(c, `token=${TOKEN}`).expect(404);
+    await ask(c, `token=wrong&domain=web.example.com`).expect(404);
+    await ask(c, `domain=web.example.com`).expect(404);
+
+    const st = await request(c.app).get("/api/v1/hosting/apps/web/domains/status").set("Cookie", c.cookie).expect(200);
+    expect(st.body.data.caddy).toEqual({ enabled: true });
+    expect(JSON.stringify(st.body)).not.toContain(TOKEN);
+  });
+
+  it("is disabled (404) when no token is configured", async () => {
+    const c = await setup();
+    await create(c, { id: "web", name: "Web", runtime: "static", deployMethod: "upload", domains: ["web.example.com"] }).expect(201);
+    await ask(c, "token=anything&domain=web.example.com").expect(404);
+    await ask(c, "domain=web.example.com").expect(404);
+  });
+
+  it("stops approving a domain after it is removed", async () => {
+    const c = await setup({ CADDY_ASK_TOKEN: TOKEN });
+    await create(c, { id: "web", name: "Web", runtime: "static", deployMethod: "upload", domains: ["web.example.com"] }).expect(201);
+    await request(c.app).put("/api/v1/hosting/apps/web/domains").set("Cookie", c.cookie).send({ domains: [] }).expect(200);
+    await ask(c, `token=${TOKEN}&domain=web.example.com`).expect(404);
+  });
+});
+
+
+describe("managed MySQL", () => {
+  it("keeps generated credentials private, requires confirmation and protects manual databases", async () => {
+    const sql = vi.spyOn(MysqlAdmin.prototype, "run").mockResolvedValue();
+    try {
+      const c = await setup();
+      await create(c, { id: "mysql-app", name: "MySQL app", runtime: "laravel", deployMethod: "upload" }).expect(201);
+      const post = (op: string, body = {}) => request(c.app).post(`/api/v1/hosting/apps/mysql-app/database/${op}`).set("Cookie", c.cookie).send(body);
+      await post("create").expect(200);
+      const db = (await getApp(c, "mysql-app")).database;
+      expect(db).toMatchObject({ managed: true, name: managedName("mysql-app"), host: "127.0.0.1", passwordSet: true });
+      const first = (await c.service.secrets.read("mysql-app")).dbPassword!;
+      expect(first).toMatch(/^[a-f0-9]{64}$/);
+      expect(JSON.stringify(await getApp(c, "mysql-app"))).not.toContain(first);
+      await post("create").expect(409);
+      await post("delete", { confirm: "wrong" }).expect(400);
+      expect(sql).toHaveBeenCalledTimes(3);
+      await post("reset", { confirm: "mysql-app" }).expect(200);
+      expect((await c.service.secrets.read("mysql-app")).dbPassword).not.toBe(first);
+      await post("delete", { confirm: "mysql-app" }).expect(200);
+      expect((await getApp(c, "mysql-app")).database.type).toBe("none");
+      await post("reset", { confirm: "mysql-app" }).expect(400);
+      expect(managedName("foo-bar")).not.toBe(managedName("foob-ar"));
+    } finally { sql.mockRestore(); }
+  });
+  it("cleans up only its newly created database when account creation fails", async () => {
+    const sql = vi.spyOn(MysqlAdmin.prototype, "run").mockResolvedValueOnce().mockRejectedValueOnce(new Error("account exists")).mockResolvedValueOnce();
+    try {
+      await expect(new MysqlAdmin("unused").create("mysql-app", "a".repeat(64))).rejects.toThrow("account exists");
+      expect(sql.mock.calls[2][0]).toMatch(/^DROP DATABASE/);
+      expect(sql.mock.calls.map(x => x[0]).join(" ")).not.toContain("DROP USER");
+    } finally { sql.mockRestore(); }
+  });
+});
+
+
+it("runs Laravel migrations before activation and preserves the active release on migration failure", async () => {
+  const c = await setup();
+  const migration = vi.fn().mockResolvedValue({ started: true, detail: null });
+  (c.executor as HostExecutor).runMigration = migration;
+  await create(c, { id: "migrate-app", name: "Migrate", runtime: "laravel", deployMethod: "upload" }).expect(201);
+  await c.service.setDatabase("migrate-app", { type: "mysql", name: "manual_db", user: "manual_user", password: "secret", autoMigrate: true }, "test");
+  const source = makeZip([{ name: "artisan", data: "<?php" }, { name: "composer.json", data: "{}" }, { name: "public/index.php", data: "<?php" }]);
+  await upload(c, "migrate-app", source).expect(202);
+  await c.service.waitIdle();
+  expect(migration).toHaveBeenCalledTimes(1);
+  const first = await getApp(c, "migrate-app");
+  expect(first.activeRelease.id).toBeTruthy();
+  migration.mockResolvedValue({ started: true, detail: "failed" });
+  await upload(c, "migrate-app", source).expect(202);
+  await c.service.waitIdle();
+  const failed = await getApp(c, "migrate-app");
+  expect(failed.activeRelease.id).toBe(first.activeRelease.id);
+  expect(failed.deployments[0].status).toBe("failed");
+  await request(c.app).post("/api/v1/hosting/apps/migrate-app/database/migrate").set("Cookie", c.cookie).send({ confirm: "wrong" }).expect(400);
+  migration.mockResolvedValue({ started: true, detail: null });
+  await request(c.app).post("/api/v1/hosting/apps/migrate-app/database/migrate").set("Cookie", c.cookie).send({ confirm: "migrate-app" }).expect(200);
 });

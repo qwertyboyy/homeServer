@@ -169,7 +169,7 @@ export function hostingRouter(service: HostingService, env: Env) {
     handle(async (req, res) => {
       const id = appId(req);
       if (parse(DeleteBody, req.body).confirm !== id) throw new HostingError(400, "Konfirmasi tidak cocok: ketik ID aplikasi");
-      await service.deleteApp(id, actor(req));
+      await service.deleteApp(id, actor(req), parse(DeleteBody, req.body).deleteDatabase);
       ok(res, { deleted: id });
     }),
   );
@@ -189,6 +189,18 @@ export function hostingRouter(service: HostingService, env: Env) {
   router.get("/apps/:id/domains/status", handle(async (req, res) => ok(res, await service.domainStatus(appId(req)))));
   router.put("/apps/:id/env", handle(async (req, res) => ok(res, await service.setEnv(appId(req), parse(EnvBody, req.body), actor(req)))));
   router.put("/apps/:id/database", handle(async (req, res) => ok(res, await service.setDatabase(appId(req), parse(DatabaseBody, req.body), actor(req)))));
+  for (const operation of ["create", "reset", "delete"] as const) {
+    router.post(`/apps/:id/database/${operation}`, handle(async (req, res) => {
+      const id = appId(req);
+      if (operation !== "create" && parse(DeleteBody, req.body).confirm !== id) throw new HostingError(400, "Konfirmasi tidak cocok: ketik ID aplikasi");
+      ok(res, await service.managedDatabase(id, operation, actor(req)));
+    }));
+  }
+  router.post("/apps/:id/database/migrate", handle(async (req, res) => {
+    const id = appId(req);
+    if (parse(DeleteBody, req.body).confirm !== id) throw new HostingError(400, "Konfirmasi tidak cocok: ketik ID aplikasi");
+    ok(res, await service.migrate(id, actor(req)));
+  }));
   router.put("/apps/:id/git-token", handle(async (req, res) => ok(res, await service.setGitToken(appId(req), parse(GitTokenBody, req.body).token, actor(req)))));
 
   router.post(

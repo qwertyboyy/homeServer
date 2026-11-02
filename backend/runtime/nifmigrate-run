@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+case "${NIF_RELEASE:-}" in r[0-9]*-[0-9a-f]*) ;; *) exit 64 ;; esac
+case "$NIF_RELEASE" in *[!a-z0-9-]*) exit 64 ;; esac
+cd "releases/$NIF_RELEASE"
+STATE="${STATE_DIRECTORY:?}"
+for d in cache storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs; do
+  mkdir -p "$STATE/$d"
+done
+export APP_SERVICES_CACHE="$STATE/cache/services.php" APP_PACKAGES_CACHE="$STATE/cache/packages.php"
+# Ignore any stale config cache bundled with a release.
+export APP_CONFIG_CACHE="$STATE/cache/migration-config.php" APP_ROUTES_CACHE="$STATE/cache/routes-v7.php"
+export APP_ENV=production APP_DEBUG=false LOG_CHANNEL=stderr
+exec /usr/bin/php artisan migrate --force --no-interaction

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { authRouter, requireAuth } from "./auth/routes.js";
 import { SessionStore } from "./auth/sessions.js";
 import type { Env } from "./config/env.js";
+import { caddyRouter } from "./hosting/caddy.js";
 import { HOSTING_PREFIX, hostingRouter, isRawUpload } from "./hosting/routes.js";
 import type { HostingService } from "./hosting/service.js";
 import type { EventLog } from "./lib/events.js";
@@ -49,6 +50,9 @@ export function createApp(env: Env, sources: DataSources, events: EventLog, host
   api.get("/health", (_req, res) => ok(res, { status: "ok", mock: sources.mock }));
 
   api.use("/auth", authRouter(env, sessions, events));
+
+  // Caddy's on-demand TLS hook: no session, guarded by its own shared secret.
+  if (hosting) api.use("/caddy", caddyRouter(hosting, env));
 
   // Everything below requires an authenticated session.
   api.use(requireAuth(sessions));

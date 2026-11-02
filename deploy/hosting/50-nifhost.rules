@@ -11,7 +11,7 @@ polkit.addRule(function (action, subject) {
       (verb === "start" || verb === "stop" || verb === "restart")) {
     return polkit.Result.YES;
   }
-  if (/^nifbuild@[a-z][a-z0-9-]{1,30}[a-z0-9]\.service$/.test(unit) && verb === "start") {
+  if (/^(nifbuild|nifmigrate)@[a-z][a-z0-9-]{1,30}[a-z0-9]\.service$/.test(unit) && verb === "start") {
     return polkit.Result.YES;
   }
   return polkit.Result.NOT_HANDLED;

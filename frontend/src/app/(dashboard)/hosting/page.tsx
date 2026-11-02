@@ -204,7 +204,7 @@ function CreateForm({ runtimes, overview, onClose }: { runtimes: RuntimeInfo[]; 
           <div className="grid grid-cols-2 gap-2">
             {(
               [
-                { key: "upload", label: "Upload ZIP", icon: Upload },
+                { key: "upload", label: "Upload (ZIP/Folder/File)", icon: Upload },
                 { key: "github", label: "GitHub", icon: GitBranch },
               ] as const
             ).map(({ key, label, icon: Icon }) => (
@@ -236,7 +236,13 @@ function CreateForm({ runtimes, overview, onClose }: { runtimes: RuntimeInfo[]; 
           <Field
             label="Subdomain"
             htmlFor="h-sub"
-            hint={overview?.cloudflare.configured ? `DNS & HTTPS dibuat otomatis di Cloudflare → ${sub || "nama"}.${base}` : `Alamat: ${sub || "nama"}.${base}. Cloudflare otomatis belum aktif — DNS diatur manual (tab Domain).`}
+            hint={
+              overview?.cloudflare.configured
+                ? `DNS & HTTPS dibuat otomatis di Cloudflare → ${sub || "nama"}.${base}`
+                : overview?.caddy.enabled
+                  ? `HTTPS otomatis lewat Caddy → ${sub || "nama"}.${base}. Pastikan DNS (record A atau wildcard *.${base}) mengarah ke IP server.`
+                  : `Alamat: ${sub || "nama"}.${base}. Cloudflare/Caddy otomatis belum aktif — DNS & HTTPS diatur manual (tab Domain).`
+            }
           >
             <div className="flex items-center gap-2">
               <input

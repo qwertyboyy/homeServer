@@ -1,3 +1,4 @@
+import { MysqlAdmin, managedName } from "./mysql.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import net from "node:net";
@@ -335,6 +336,7 @@ export class HostingService {
       internalHost: this.internalHost(id),
       baseDomain: this.deps.env.HOSTING_BASE_DOMAIN || null,
       cloudflare: await this.cloudflare.status(),
+      caddy: { enabled: !!this.deps.env.CADDY_ASK_TOKEN },
       tunnelConfig: tunnel.status,
       domains,
       snippet: app.domains.length ? tunnelSnippet(app.domains, port) : null,
@@ -342,9 +344,15 @@ export class HostingService {
     };
   }
 
+  /** True when `host` is a domain of a registered app (answer for Caddy's on-demand TLS `ask` hook). */
+  isHostedDomain(host: string) {
+    if (!host || this.reserved.some((r) => hostMatches(r, host)) || host.endsWith(INTERNAL_SUFFIX)) return false;
+    return this.registry.list().some((a) => a.domains.includes(host));
+  }
+
   /** What the "new site" wizard needs to offer one-click subdomains. */
   async overview() {
-    return { baseDomain: this.deps.env.HOSTING_BASE_DOMAIN || null, cloudflare: await this.cloudflare.status() };
+    return { baseDomain: this.deps.env.HOSTING_BASE_DOMAIN || null, cloudflare: await this.cloudflare.status(), caddy: { enabled: !!this.deps.env.CADDY_ASK_TOKEN } };
   }
 
   auditList(limit: number) {
@@ -397,7 +405,7 @@ export class HostingService {
       healthPath: body.healthPath,
       options: withDefaults(body.runtime, body.options),
       env: [],
-      database: { type: "none", host: null, port: null, name: null, user: null, passwordSet: false },
+      database: { type: "none", host: null, port: null, name: null, user: null, passwordSet: false, managed: false, autoMigrate: false },
       gitTokenSet: false,
       desiredState: "running",
       activeReleaseId: null,
@@ -516,17 +524,64 @@ export class HostingService {
 
   async setDatabase(id: string, body: z.infer<typeof DatabaseBody>, actor: string) {
     this.requireApp(id);
+    if (this.busy) throw new HostingError(409, "Operasi hosting sedang berjalan");
+    if (this.requireApp(id).database.managed) {
+      const updated = (await this.registry.update(id, a => ({ ...a, database: { ...a.database, autoMigrate: body.autoMigrate ?? a.database.autoMigrate } })))!;
+      await this.secrets.write(updated, await this.secrets.read(id));
+      return this.getApp(id);
+    }
     const current = await this.secrets.read(id);
     const server = body.type === "mysql" || body.type === "postgresql";
     if (server && (!body.name || !body.user)) throw new HostingError(400, "Nama database dan user wajib diisi");
     const password = server ? (body.password ?? current.dbPassword) : null;
     const database: AppRecord["database"] = server
-      ? { type: body.type, host: body.host ?? "127.0.0.1", port: body.port ?? (body.type === "mysql" ? 3306 : 5432), name: body.name!, user: body.user!, passwordSet: !!password }
-      : { type: body.type, host: null, port: null, name: null, user: null, passwordSet: false };
+      ? { type: body.type, host: body.host ?? "127.0.0.1", port: body.port ?? (body.type === "mysql" ? 3306 : 5432), name: body.name!, user: body.user!, passwordSet: !!password, managed: false, autoMigrate: body.autoMigrate ?? false }
+      : { type: body.type, host: null, port: null, name: null, user: null, passwordSet: false, managed: false, autoMigrate: false };
     const updated = (await this.registry.update(id, (a) => ({ ...a, database })))!;
     await this.secrets.write(updated, { ...current, dbPassword: password });
     await this.audit.record(actor, "database.update", id, `Database diatur: ${body.type}${server ? ` (${database.name}@${database.host})` : ""}`);
     return this.getApp(id);
+  }
+
+  async managedDatabase(id: string, operation: "create" | "reset" | "delete", actor: string) {
+    const app = this.requireApp(id);
+    this.claim(app);
+    try {
+      const admin = new MysqlAdmin(this.deps.env.HOSTING_MYSQL_DEFAULTS_FILE);
+      if (operation === "create" && app.database.type !== "none") throw new HostingError(409, "Lepaskan konfigurasi database lama terlebih dahulu");
+      if (operation !== "create" && (!app.database.managed || app.database.name !== managedName(id))) throw new HostingError(400, "Bukan database yang dikelola dashboard");
+      const password = crypto.randomBytes(32).toString("hex");
+      if (operation === "create") await admin.create(id, password);
+      else if (operation === "reset") await admin.reset(id, password);
+      else await admin.drop(id);
+      const database: AppRecord["database"] = operation === "delete"
+        ? { type: "none", host: null, port: null, name: null, user: null, passwordSet: false, managed: false, autoMigrate: false }
+        : { type: "mysql", host: "127.0.0.1", port: 3306, name: managedName(id), user: managedName(id), passwordSet: true, managed: true, autoMigrate: app.database.autoMigrate };
+      const updated = { ...app, database };
+      await this.secrets.write(updated, { ...await this.secrets.read(id), dbPassword: operation === "delete" ? null : password });
+      await this.registry.update(id, a => ({ ...a, database }));
+      await this.audit.record(actor, `database.${operation}`, id, `Database MySQL: ${operation}`);
+      return this.getApp(id);
+    } finally { this.busy = null; }
+  }
+
+  private async migrateRelease(app: AppRecord, releaseId: string) {
+    if (app.runtime !== "laravel" || app.database.type === "none") throw new HostingError(400, "Migrasi memerlukan Laravel dan database");
+    if (!this.deps.executor.runMigration) throw new HostingError(503, "Executor migrasi belum tersedia");
+    await writeFileAtomic(path.join(this.paths.app(app.id), "migrate.env"), envLine("NIF_RELEASE", releaseId) + "\n", 0o600);
+    const result = await this.deps.executor.runMigration(app.id);
+    if (!result.started || result.detail) throw new HostingError(500, "Migrasi gagal; periksa journalctl unit nifmigrate di server");
+  }
+
+  async migrate(id: string, actor: string) {
+    const app = this.requireApp(id);
+    if (!app.activeReleaseId) throw new HostingError(400, "Deploy aplikasi terlebih dahulu");
+    this.claim(app);
+    try {
+      await this.migrateRelease(app, app.activeReleaseId);
+      await this.audit.record(actor, "database.migrate", id, "Migrasi Laravel selesai");
+      return this.getApp(id);
+    } finally { this.busy = null; }
   }
 
   async setGitToken(id: string, token: string | null, actor: string) {
@@ -558,12 +613,13 @@ export class HostingService {
     return this.getApp(id);
   }
 
-  async deleteApp(id: string, actor: string) {
+  async deleteApp(id: string, actor: string, deleteDatabase = false) {
     const app = this.requireApp(id);
     if (this.busy?.appId === id) throw new HostingError(409, "Deployment sedang berjalan untuk aplikasi ini");
     if (isProcessRuntime(app.runtime) && app.activeReleaseId) {
       await this.deps.executor.unitAction(id, "stop").catch(() => undefined);
     }
+    if (deleteDatabase && app.database.managed) await this.managedDatabase(id, "delete", actor);
     // Unpublish first, then remove releases while the registry entry still exists:
     // the fallback cleanup (builder "clean" phase) needs it for build-owned files.
     await this.registry.update(id, (a) => ({ ...a, desiredState: "stopped" }));
@@ -616,7 +672,7 @@ export class HostingService {
       // Validate the whole central directory before accepting the job.
       const plan = await inspectZip(zipPath, limits);
       // A static site without a findable index.html is rejected here, before anything is built or activated.
-      if (this.autoDocRoot(app)) detectDocRoot(plan.entries.filter((e) => !e.dir).map((e) => e.name));
+      if (this.autoDocRoot(app)) detectDocRoot(plan.entries.filter((e) => !e.dir).map((e) => e.name), { promoteLoneHtml: true });
     } catch (err) {
       await fs.rm(zipPath, { force: true });
       if (err instanceof ArchiveError || err instanceof StaticSiteError) {
@@ -637,8 +693,9 @@ export class HostingService {
         const r = await extractZip(zipPath, dir, limits);
         await log(`Arsip diekstrak: ${r.files} file, ${(r.bytes / 1048576).toFixed(1)} MB${r.skipped ? `, ${r.skipped} entri dilewati (.git, node_modules, .env)` : ""}${r.stripped ? `, folder induk "${r.stripped}" dilepas` : ""}`);
         if (this.autoDocRoot(app)) {
-          const found = detectDocRoot(await listFiles(dir));
+          const found = detectDocRoot(await listFiles(dir), { promoteLoneHtml: true });
           const { removed } = await flattenDocRoot(dir, found.root);
+          if (found.renamed) await fs.rename(path.join(dir, path.posix.basename(found.renamed.from)), path.join(dir, "index.html"));
           await log(`${found.note}${removed ? `; ${removed} file di luar document root tidak disertakan` : ""}`);
         }
         await normalizeModes(dir);
@@ -755,7 +812,7 @@ export class HostingService {
         let bytes = 0;
         for (const [rel, size] of st.files) {
           if (!rel.startsWith(prefix)) continue;
-          const dest = found.renamed ? "index.html" : rel.slice(prefix.length);
+          const dest = found.renamed?.from === rel ? "index.html" : rel.slice(prefix.length);
           const target = path.resolve(base, ...dest.split("/"));
           if (!target.startsWith(base + path.sep)) throw new Error("Path keluar dari folder rilis");
           await fs.mkdir(path.dirname(target), { recursive: true });
@@ -874,6 +931,10 @@ export class HostingService {
           const release: ReleaseRecord = { id: releaseId, createdAt: new Date().toISOString(), source: method, commit, sizeBytes: size, status: "ready" };
           current = (await this.registry.update(app.id, (a) => ({ ...a, releases: [...a.releases, release] })))!;
 
+          if (current.runtime === "laravel" && current.database.autoMigrate) {
+            await log("Menjalankan migrasi Laravel sebelum aktivasi (perubahan schema tidak otomatis dibatalkan)");
+            await this.migrateRelease(current, releaseId);
+          }
           const outcome = await this.activate(current, releaseId, log);
           await this.finish(app.id, deploymentId, outcome.status, outcome.message);
           await this.audit.record(actor, outcome.status === "succeeded" ? "deploy.success" : "deploy.failed", app.id, `Deploy ${deploymentId}: ${outcome.message}`, outcome.status === "succeeded" ? "info" : "error");

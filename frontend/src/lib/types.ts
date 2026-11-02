@@ -152,7 +152,7 @@ export interface HostedAppDetail extends HostedApp {
   releases: ReleaseRecord[];
   deployments: DeploymentRecord[];
   env: { key: string; secret: boolean; value: string | null; set: boolean }[];
-  database: { type: "none" | "sqlite" | "mysql" | "postgresql"; host: string | null; port: number | null; name: string | null; user: string | null; passwordSet: boolean };
+  database: { type: "none" | "sqlite" | "mysql" | "postgresql"; host: string | null; port: number | null; name: string | null; user: string | null; passwordSet: boolean; managed: boolean; autoMigrate: boolean };
   gitTokenSet: boolean;
 }
 
@@ -191,10 +191,12 @@ export interface DomainSyncResult {
 export interface HostingOverview {
   baseDomain: string | null;
   cloudflare: CloudflareStatus;
+  caddy: { enabled: boolean };
 }
 
 export interface DomainStatus {
   cloudflare: CloudflareStatus;
+  caddy: { enabled: boolean };
   gatewayPort: number;
   internalHost: string;
   baseDomain: string | null;

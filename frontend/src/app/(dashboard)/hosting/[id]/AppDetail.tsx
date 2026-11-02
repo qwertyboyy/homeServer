@@ -616,6 +616,10 @@ function Domains({ app, refresh }: Props) {
                     Cloudflare <strong>otomatis</strong>: record DNS {cf.ingress ? "dan ingress tunnel " : ""}dikelola dashboard
                     {cf.ingress ? "." : "; ingress tunnel tetap dari config.yml (pakai rule wildcard, atau salin snippet di bawah)."}
                   </>
+                ) : status.data.caddy.enabled ? (
+                  <>
+                    <strong>HTTPS otomatis lewat Caddy.</strong> Arahkan record DNS <span className="font-mono text-xs">A</span> (atau wildcard) domain ke IP publik server; sertifikat dibuat saat domain pertama kali dibuka.
+                  </>
                 ) : (
                   <>
                     Dashboard <strong>tidak mengubah</strong> DNS atau tunnel (Cloudflare belum diaktifkan).
@@ -624,7 +628,7 @@ function Domains({ app, refresh }: Props) {
                 Semua domain diarahkan ke gateway hosting <span className="font-mono text-xs">127.0.0.1:{status.data.gatewayPort}</span>; gateway memilih aplikasi berdasarkan Host.
               </p>
             </div>
-            {status.data.snippet && !cf?.ingress && (
+            {status.data.snippet && !cf?.ingress && !(status.data.caddy.enabled && !cf?.configured) && (
               <>
                 <CopyBlock text={status.data.snippet} label="Salin snippet ingress" />
                 <p className="text-sm text-ink-2">Lalu jalankan di server (ganti &lt;nama-tunnel&gt;):</p>
@@ -733,7 +737,7 @@ function DatabaseTab({ app, refresh }: Props) {
     const form = e.currentTarget;
     const f = new FormData(form);
     const str = (k: string) => String(f.get(k) ?? "").trim();
-    const body: Record<string, unknown> = { type };
+    const body: Record<string, unknown> = { type, autoMigrate: f.get("autoMigrate") === "on" };
     if (server) {
       body.host = str("host") || "127.0.0.1";
       if (str("port")) body.port = Number(str("port"));
@@ -752,6 +756,22 @@ function DatabaseTab({ app, refresh }: Props) {
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1fr]">
       <Card>
         <CardTitle icon={Database} title="Database aplikasi" />
+        <div className="my-3 flex flex-wrap gap-2">
+          {db.type === "none" && <Button disabled={save.busy} onClick={async () => {
+            if (await save.run(() => api(`/hosting/apps/${app.id}/database/create`, { method: "POST", json: {} }))) refresh();
+          }}>Buat database MySQL</Button>}
+          {db.managed && (["reset", "delete"] as const).map(operation => <Button key={operation} disabled={save.busy} onClick={async () => {
+            const confirm = window.prompt(`${operation === "delete" ? "Hapus permanen database beserta seluruh isinya" : "Reset password database; restart aplikasi setelah selesai"}. Ketik ID aplikasi: ${app.id}`);
+            if (confirm !== app.id) return;
+            if (await save.run(() => api(`/hosting/apps/${app.id}/database/${operation}`, { method: "POST", json: { confirm } }))) refresh();
+          }}>{operation === "delete" ? "Hapus database" : "Reset password"}</Button>)}
+          {app.runtime === "laravel" && db.type !== "none" && <Button disabled={save.busy} onClick={async () => {
+            const confirm = window.prompt(`Migrasi mengubah schema database. Ketik ID aplikasi: ${app.id}`);
+            if (confirm !== app.id) return;
+            if (await save.run(() => api(`/hosting/apps/${app.id}/database/migrate`, { method: "POST", json: { confirm } }))) refresh();
+          }}>Migrate Laravel</Button>}
+        </div>
+
         <form onSubmit={submit} className="space-y-3">
           <Field label="Jenis" htmlFor="db-type">
             <select id="db-type" value={type} onChange={(e) => setType(e.target.value as typeof type)} className={inputCls}>
@@ -784,6 +804,7 @@ function DatabaseTab({ app, refresh }: Props) {
               </Field>
             </div>
           )}
+          {app.runtime === "laravel" && <label className="flex gap-2 text-sm"><input type="checkbox" name="autoMigrate" defaultChecked={db.autoMigrate} />Jalankan migrasi otomatis sebelum setiap deploy. Perubahan schema tidak dibatalkan saat rollback.</label>}
           <InlineError message={save.error} />
           <Button type="submit" icon={Save} disabled={save.busy}>
             Simpan
@@ -803,7 +824,7 @@ function DatabaseTab({ app, refresh }: Props) {
           <div className="space-y-3 text-sm text-ink-2">
             <p>
               Variabel <span className="font-mono text-xs">DB_HOST, DB_PORT, DB_DATABASE, DB_USERNAME, DB_PASSWORD, DATABASE_URL</span> disuntikkan saat runtime. Server database
-              tidak dibuat otomatis; cek status di Prasyarat. Buat database & user sekali di server:
+              tersedia setelah konfigurasi disimpan. Gunakan tombol Buat database MySQL untuk pengelolaan otomatis, atau buat database manual di server:
             </p>
             <CopyBlock text={sql} label="Salin SQL" />
           </div>
@@ -823,6 +844,7 @@ function SettingsTab({ app, refresh }: Props) {
   const del = useMutation();
   const [method, setMethod] = useState(app.deployMethod);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteDatabase, setDeleteDatabase] = useState(false);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -932,6 +954,7 @@ function SettingsTab({ app, refresh }: Props) {
         <Card className="border-bad/30">
           <CardTitle icon={Trash2} title="Hapus aplikasi" />
           <p className="mb-3 text-sm text-ink-2">Menghentikan service, menghapus route gateway, semua rilis, log, dan secret aplikasi ini. Tidak bisa dibatalkan.</p>
+          {app.database.managed && <label className="mb-3 flex gap-2 text-sm"><input type="checkbox" checked={deleteDatabase} onChange={e => setDeleteDatabase(e.target.checked)} />Hapus juga database MySQL beserta seluruh isinya</label>}
           <Button icon={Trash2} onClick={() => setConfirmDelete(true)} className="bg-bad hover:bg-bad/90">
             Hapus…
           </Button>
@@ -944,7 +967,7 @@ function SettingsTab({ app, refresh }: Props) {
             busy={del.busy}
             error={del.error}
             onConfirm={async (typed) => {
-              if (await del.run(() => api(`/hosting/apps/${app.id}`, { method: "DELETE", json: { confirm: typed } }))) router.push("/hosting");
+              if (await del.run(() => api(`/hosting/apps/${app.id}`, { method: "DELETE", json: { confirm: typed, deleteDatabase } }))) router.push("/hosting");
             }}
             onClose={() => {
               setConfirmDelete(false);

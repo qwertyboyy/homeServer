@@ -46,7 +46,7 @@ export function checkUploadExtension(rel: string) {
 export interface DocRoot {
   /** Directory holding index.html, relative to the upload root ("." = the root itself). */
   root: string;
-  /** Set when a lone HTML file was promoted to index.html. */
+  /** Set when the only HTML file was promoted to index.html. `from` is its path relative to the upload root. */
   renamed?: { from: string };
   /** Human-readable explanation for the deployment log. */
   note: string;
@@ -63,8 +63,15 @@ const listDirs = (dirs: string[]) => dirs.map((d) => `${d}/`).join(", ");
 export function detectDocRoot(files: string[], opts: { promoteLoneHtml?: boolean } = {}): DocRoot {
   if (!files.length) throw new StaticSiteError("Tidak ada file yang diunggah");
 
-  if (opts.promoteLoneHtml && files.length === 1 && !files[0].includes("/") && /^.+\.html?$/i.test(files[0]) && files[0] !== "index.html") {
-    return { root: ".", renamed: { from: files[0] }, note: `File tunggal "${files[0]}" disajikan sebagai index.html` };
+  if (opts.promoteLoneHtml) {
+    // No index.html anywhere and exactly one HTML page: that page is the site (other files are its assets).
+    const hasIndex = files.some((f) => f === "index.html" || f.endsWith("/index.html"));
+    const pages = files.filter((f) => /^.+\.html?$/i.test(f) && f.split("/").length <= MAX_DEPTH + 1);
+    if (!hasIndex && pages.length === 1) {
+      const from = pages[0];
+      const slash = from.lastIndexOf("/");
+      return { root: slash < 0 ? "." : from.slice(0, slash), renamed: { from }, note: `File HTML tunggal "${from}" disajikan sebagai index.html` };
+    }
   }
 
   const dirs = new Set<string>();

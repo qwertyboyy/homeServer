@@ -51,6 +51,7 @@ const EnvSchema = z.object({
   HOSTING_RESERVED_HOSTS: z.string().default("drive.nifserver.cloud,panel.nifserver.cloud"),
   HOSTING_BASE_DOMAIN: z.string().default(""),
   HOSTING_CLOUDFLARED_CONFIG: z.string().default("/etc/cloudflared/config.yml"),
+  HOSTING_MYSQL_DEFAULTS_FILE: z.string().default(""),
   HOSTING_RUNTIME_DIR: z.string().default("/usr/local/lib/nifhost"),
 
   // ---- Cloudflare automation (optional; see deploy/hosting/README.md) ----
@@ -58,6 +59,10 @@ const EnvSchema = z.object({
   CLOUDFLARE_API_TOKEN: optional(z.string().min(20).max(200)),
   CLOUDFLARE_ZONE_ID: optional(z.string().regex(/^[a-f0-9]{32}$/, "must be a 32-char hex zone id")),
   CLOUDFLARE_TUNNEL_ID: optional(z.string().regex(/^[a-f0-9-]{36}$/i, "must be a tunnel UUID").transform((v) => v.toLowerCase())),
+  // ---- Caddy automatic HTTPS (optional; see deploy/caddy/README.md) ----
+  // Shared secret between Caddy's on-demand TLS `ask` hook and this API. Generate: openssl rand -hex 24
+  CADDY_ASK_TOKEN: optional(z.string().regex(/^[A-Za-z0-9_-]{24,128}$/, "must be 24-128 chars of A-Z a-z 0-9 _ -")),
+
   CLOUDFLARE_ACCOUNT_ID: optional(z.string().regex(/^[a-f0-9]{32}$/, "must be a 32-char hex account id")),
 });
 

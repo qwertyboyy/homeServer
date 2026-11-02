@@ -136,7 +136,13 @@ Perilaku & batasan:
   perlu disentuh lagi. SSL universal gratis hanya mencakup **satu tingkat** subdomain (`app.nifserver.cloud`).
 - Batas upload Cloudflare Free: 100 MB per request (lebih kecil dari `HOSTING_MAX_UPLOAD_MB` bila Anda menaikkannya).
 
-### Manual (tanpa token Cloudflare)
+### Tanpa Cloudflare: HTTPS otomatis lewat Caddy
+
+Server yang punya IP publik dan port 80/443 bebas bisa memakai Caddy: domain yang ditambah di dashboard otomatis
+mendapat sertifikat Let's Encrypt. Pasang sekali dengan [deploy/caddy/README.md](../caddy/README.md); DNS (record `A`)
+tetap Anda arahkan sendiri ke IP server.
+
+### Manual (tanpa token Cloudflare maupun Caddy)
 
 Tanpa variabel di atas, dashboard **tidak** mengubah DNS, Cloudflare, cloudflared, atau Nginx dan **tidak**
 mengasumsikan wildcard DNS.
@@ -178,7 +184,7 @@ dengan `proxy_set_header Host $host;` — gateway hanya bind ke loopback.
 - Kunci dicadangkan ditolak: `PATH`, `HOME`, `PORT`, `HOST`, `NODE_OPTIONS`, `LD_*`, `NIF_*`, `SYSTEMD_*`, dll.
 - Laravel: `APP_KEY` dibuat otomatis sebagai secret; `APP_ENV=production`, `APP_DEBUG=false`, `LOG_CHANNEL=stderr`.
 - Database: **SQLite** (file di `/var/lib/nifhost/<id>/database.sqlite`, tanpa server) atau MySQL/MariaDB/PostgreSQL di
-  **localhost** (sandbox memblokir LAN). Dashboard tidak membuat database; tab Database menampilkan SQL pembuatan
+  **localhost** (sandbox memblokir LAN). Tab Database mendukung pembuatan database MySQL terkelola dan juga menampilkan SQL pembuatan
   DB/user. Variabel: `DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `DATABASE_URL`.
 - Perubahan env/database berlaku setelah **Restart** (app proses) atau **deploy ulang** (situs statis).
 
@@ -215,3 +221,65 @@ perlindungan replay, dan manajemen secret — sengaja ditunda). Deploy dipicu ma
 | Health check gagal | `journalctl -u nifapp@<id>`; health path benar? app listen di `$PORT` & `127.0.0.1`? |
 | Situs 404 di domain | rule ingress cloudflared ke `:8090`; `curl -H 'Host: <domain>' http://127.0.0.1:8090/` |
 | Next.js kehabisan memori saat build | tutup app lain atau naikkan `MemoryMax` via `sudo systemctl edit nifbuild@<id>` |
+
+
+## Database MySQL terkelola dan migrasi Laravel
+
+Tab Database: **Buat database MySQL**, **Reset password**, **Hapus database** (ketik ID),
+**Migrate Laravel**, dan checkbox migrasi otomatis sebelum aktivasi rilis.
+Saat menghapus aplikasi, checkbox penghapusan database secara default mati.
+Database manual tidak pernah dihapus/reset oleh fitur ini. Nama database/user terkelola
+adalah `nifdb` + 24 digit hash ID aplikasi (29 karakter; ID dengan tanda hubung tidak bertabrakan).
+Password acak 32 byte disimpan hanya sebagai secret. Restart aplikasi setelah reset password.
+
+Prasyarat server: MySQL 8, `/usr/bin/mysql` (paket mysql-client), PHP CLI + pdo_mysql.
+Jalankan ulang `deploy/hosting/install.sh` untuk memasang unit `nifmigrate@`, launcher,
+dan aturan polkit; lalu restart backend. Migrasi memakai sandbox runtime dengan state
+aplikasi dan hanya kredensial aplikasi, tidak memakai kredensial admin. Kegagalan migrasi
+menggagalkan deploy sebelum aktivasi. Rollback rilis tidak membatalkan perubahan schema;
+backup dan gunakan migrasi kompatibel dengan versi aplikasi sebelumnya.
+Log migrasi: `sudo journalctl -u nifmigrate@ID_APLIKASI.service`.
+
+Konfigurasi sekali oleh administrator melalui `sudo mysql` (ganti password):
+
+```sql
+-- Prefix grant memerlukan partial_revokes=OFF; periksa dahulu.
+SHOW VARIABLES LIKE 'partial_revokes';
+CREATE USER 'nifhost_admin'@'127.0.0.1' IDENTIFIED BY 'GANTI_PASSWORD_ADMIN_KUAT';
+GRANT ALL PRIVILEGES ON `nifdb%`.* TO 'nifhost_admin'@'127.0.0.1' WITH GRANT OPTION;
+GRANT CREATE USER ON *.* TO 'nifhost_admin'@'127.0.0.1';
+```
+
+`CREATE USER` adalah hak global yang juga memungkinkan perubahan/penghapusan akun lain.
+Jadi akun ini bukan boundary isolasi akun MySQL; gunakan instance MySQL khusus hosting
+jika server memuat akun/database sensitif lain. Hak data dibatasi prefix `nifdb`.
+Jangan menggunakan root atau memberikan hak global atas data kepada dashboard.
+Jika partial_revokes=ON, jangan mengubah kebijakan server bersama tanpa evaluasi;
+siapkan instance hosting terpisah dengan prefix grants yang didukung.
+
+Buat `/etc/nifserver/mysql-admin.cnf`, dimiliki root, grup user backend, mode 0640:
+
+```ini
+[client]
+protocol=TCP
+host=127.0.0.1
+port=3306
+user=nifhost_admin
+password=GANTI_PASSWORD_ADMIN_KUAT
+```
+
+Di `/etc/nifserver/nifserver.env` tambahkan:
+
+```dotenv
+HOSTING_MYSQL_DEFAULTS_FILE=/etc/nifserver/mysql-admin.cnf
+```
+
+Konfigurasi admin tidak dikirim ke browser/build/aplikasi. SQL dikirim melalui stdin,
+tanpa password pada argv atau shell. Provisioning menolak resource yang sudah ada.
+Bila koneksi terputus atau penulisan secret gagal setelah perubahan MySQL, operasi DDL
+bukan transaksi: periksa database/user di server sebelum mencoba ulang; jangan menghapus
+resource yang belum diverifikasi. Database yang dipertahankan setelah aplikasi dihapus
+harus dikelola manual karena secret aplikasi ikut dihapus.
+
+Referensi: https://dev.mysql.com/doc/refman/8.4/en/grant.html dan
+https://dev.mysql.com/doc/refman/8.4/en/partial-revokes.html.

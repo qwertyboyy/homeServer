@@ -29,8 +29,8 @@ export function pick(list: FileList | null): { files: PickedFile[]; ignored: num
 
 /** Quick pre-check so an obviously invalid selection is not uploaded at all. The server repeats the real validation. */
 export function hasIndexHtml(files: PickedFile[]) {
-  if (files.length === 1 && /\.html?$/i.test(files[0].path)) return true; // a lone page is served as index.html
-  return files.some((f) => f.path === "index.html" || f.path.endsWith("/index.html"));
+  if (files.some((f) => f.path === "index.html" || f.path.endsWith("/index.html"))) return true;
+  return files.filter((f) => /\.html?$/i.test(f.path)).length === 1; // the only HTML page is served as index.html
 }
 
 export interface Progress {
