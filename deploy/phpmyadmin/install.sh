@@ -3,6 +3,8 @@
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "Jalankan dengan sudo" >&2; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# update-nifserver swaps/removes the directory an existing shell may still hold.
+cd "$HERE"
 ENV_FILE=/etc/nifserver/nifserver.env
 CONF=/etc/apache2/conf-available/nifserver-panel.conf
 ENABLED=/etc/apache2/conf-enabled/nifserver-panel.conf
@@ -75,13 +77,28 @@ SERVICES_TOUCHED=true
 systemctl enable --now php8.3-fpm
 systemctl restart nifserver-backend
 systemctl reload apache2
+# systemctl restart may return before Node has opened its HTTP listener.
+# Also allow Apache's graceful reload time to activate the new loopback vhost.
+wait_http() {
+    local label="$1" url="$2" status="000" attempt
+    echo "Menunggu $label siap..."
+    for attempt in $(seq 1 30); do
+        status="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 1 --max-time 2 "$url")" || status="000"
+        if [ "$status" = 200 ]; then return 0; fi
+        sleep 1
+    done
+    echo "$label belum siap: $url (HTTP $status). Periksa status service dan log Apache sebelum mencoba ulang." >&2
+    return 1
+}
+wait_http "API langsung (3001)" http://127.0.0.1:3001/api/v1/health
+wait_http "dashboard langsung (3000)" http://127.0.0.1:3000/login
+wait_http "API melalui Apache (8088)" http://127.0.0.1:8088/api/v1/health
+wait_http "dashboard melalui Apache (8088)" http://127.0.0.1:8088/login
 # Fail closed: unauthenticated PHP, signon and static asset requests must be denied.
 for path in /phpmyadmin/ /phpmyadmin/index.php /phpmyadmin/nifhost-signon.php /phpmyadmin/themes/pmahomme/img/logo_right.png; do
     status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:8088$path")"
     [ "$status" = 401 ] || { echo "Pemeriksaan akses gagal ($status) pada $path" >&2; false; }
 done
-curl -fsS --max-time 10 http://127.0.0.1:8088/api/v1/health > /dev/null
-curl -fsS --max-time 10 http://127.0.0.1:8088/login > /dev/null
 trap - ERR
 echo "Selesai. Apache panel aktif di http://127.0.0.1:8088; backup: $BACKUP"
 echo "Sekarang ubah Cloudflare Tunnel Service URL dari port 3000 ke http://127.0.0.1:8088."

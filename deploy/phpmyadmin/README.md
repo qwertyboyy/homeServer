@@ -111,3 +111,14 @@ php -l deploy/phpmyadmin/config.inc.php
 Validasi apt, PHP-FPM dan configtest final dilakukan installer pada Ubuntu server.
 Referensi Apache: https://httpd.apache.org/docs/2.4/rewrite/rewritemap.html dan
 https://httpd.apache.org/docs/2.4/mod/mod_proxy.html#proxypass.
+
+
+### Error getcwd setelah update / HTTP 503 saat installer
+
+Updater mengganti folder `/opt/nifserver`; shell lama bisa masih menunjuk inode
+folder yang sudah dibuang. Masuk ulang dengan `cd /` lalu `cd /opt/nifserver`.
+Installer juga masuk ke folder script yang masih ada sebelum menjalankan perintah.
+Setelah restart, installer menunggu HTTP 200 API dan frontend, baik langsung maupun
+melalui Apache, sebelum tes akses. Jika gagal, pesan menyebut endpoint yang gagal;
+503 sesaat tidak langsung memicu rollback. Ini tidak menutupi error service yang
+menetap: periksa `systemctl status nifserver-backend nifserver-frontend apache2`.
