@@ -43,8 +43,10 @@ Format respons: `{ "data": ..., "timestamp": "...", "error": null }`
 | `GET /hosting/prerequisites` · `GET /hosting/runtimes` · `GET /hosting/audit` | ✔ | prasyarat server (read-only), runtime yang didukung, audit hosting |
 | `GET·POST /hosting/apps` · `GET·PATCH·DELETE /hosting/apps/:id` | ✔ | daftar/buat/ubah/hapus aplikasi (hapus: `{confirm: id}`) |
 | `POST /hosting/apps/:id/deploy/upload` (`application/zip`) · `.../deploy/github` | ✔ | deploy (202, berjalan di latar) |
+| `POST /hosting/apps/:id/uploads` → `PUT .../uploads/:uploadId/file?path=` (`application/octet-stream`) → `POST .../uploads/:uploadId/commit` · `DELETE .../uploads/:uploadId` | ✔ | upload file/folder Website statis tanpa ZIP; validasi `index.html` sebelum rilis dibuat (commit → 202) |
 | `POST /hosting/apps/:id/rollback` · `.../actions` (`start\|stop\|restart`) | ✔ | rollback rilis, aksi service (stop: `{confirm: id}`) |
-| `PUT /hosting/apps/:id/{domains,env,database,git-token}` · `GET .../domains/status` | ✔ | domain, env (secret tidak pernah dikembalikan), database, token deploy |
+| `GET /hosting/overview` | ✔ | base domain + status integrasi Cloudflare (untuk wizard) |
+| `PUT /hosting/apps/:id/{domains,env,database,git-token}` · `GET .../domains/status` · `POST .../domains/sync` | ✔ | domain (sinkron DNS Cloudflare bila dikonfigurasi), env (secret tidak pernah dikembalikan), database, token deploy |
 | `GET /hosting/apps/:id/deployments/:did/log` | ✔ | log deployment yang disanitasi |
 
 ## Keamanan
@@ -145,7 +147,7 @@ sudo bash deploy/hosting/install.sh <user-backend>    # baca skripnya dulu; tida
 sudo systemctl restart nifserver-backend
 ```
 
-Jika memakai Nginx dari langkah 5, salin ulang `deploy/nginx-nifserver.conf` (sudah berisi lokasi upload ZIP 55 MB) lalu `sudo nginx -t && sudo systemctl reload nginx`. Panduan lengkap & konfigurasi domain: [deploy/hosting/README.md](deploy/hosting/README.md).
+Jika memakai Nginx dari langkah 5, salin ulang `deploy/nginx-nifserver.conf` (sudah berisi lokasi upload ZIP/file 55 MB) lalu `sudo nginx -t && sudo systemctl reload nginx`. Panduan lengkap & konfigurasi domain: [deploy/hosting/README.md](deploy/hosting/README.md).
 
 ### 6. Remote via Cloudflare (setelah LAN teruji)
 

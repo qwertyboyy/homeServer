@@ -25,8 +25,9 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ConfirmDialog, CopyBlock, DeployBadge, Field, InlineError, StatusBadge, inputCls, useMutation } from "@/components/hosting";
 import { Button, Card, CardTitle, EmptyState, ErrorState, HealthBadge, KeyValue, LoadingRows, PageHeader, UpdatedAt, cx } from "@/components/ui";
 import { api } from "@/lib/api";
+import { hasIndexHtml, pick, uploadSite, type PickedFile, type Progress } from "@/lib/siteUpload";
 import { bytes, dateTime, relative } from "@/lib/format";
-import type { DomainStatus, HostedAppDetail } from "@/lib/types";
+import type { DomainStatus, DomainSyncResult, HostedAppDetail } from "@/lib/types";
 import { usePoll } from "@/lib/usePoll";
 
 const TABS = [
@@ -110,18 +111,44 @@ function Overview({ app, refresh }: Props) {
   const [pending, setPending] = useState<"start" | "stop" | "restart" | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [mode, setMode] = useState<"files" | "folder" | "zip">("zip");
+  const [picked, setPicked] = useState<{ files: PickedFile[]; ignored: number }>({ files: [], ignored: 0 });
+  const [progress, setProgress] = useState<Progress | null>(null);
   const isStatic = app.runtime === "static" || app.runtime === "vite";
+  const looseFiles = app.runtime === "static"; // file/folder upload is for Website statis only
+  const activeMode = looseFiles ? mode : "zip";
   const busy = app.status === "deploying";
+  const missingIndex = activeMode !== "zip" && picked.files.length > 0 && !hasIndexHtml(picked.files);
+  const pickedBytes = picked.files.reduce((n, f) => n + f.file.size, 0);
+
+  function reset() {
+    setFile(null);
+    setPicked({ files: [], ignored: 0 });
+    setProgress(null);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  function chooseMode(next: "files" | "folder" | "zip") {
+    setMode(next);
+    reset();
+    deploy.setError(null);
+  }
 
   async function uploadZip(e: FormEvent) {
     e.preventDefault();
-    if (!file) return;
-    const ok = await deploy.run(() =>
-      api(`/hosting/apps/${app.id}/deploy/upload`, { method: "POST", body: file, headers: { "Content-Type": "application/zip" } }),
-    );
+    if (activeMode === "zip" ? !file : !picked.files.length || missingIndex) return;
+    const ok = await deploy.run(async () => {
+      if (activeMode === "zip") {
+        return api(`/hosting/apps/${app.id}/deploy/upload`, { method: "POST", body: file, headers: { "Content-Type": "application/zip" } });
+      }
+      try {
+        return await uploadSite(app.id, picked.files, setProgress);
+      } finally {
+        setProgress(null);
+      }
+    });
     if (ok) {
-      setFile(null);
-      if (fileRef.current) fileRef.current.value = "";
+      reset();
       refresh();
     }
   }
@@ -141,29 +168,133 @@ function Overview({ app, refresh }: Props) {
           <CardTitle icon={Upload} title="Deploy" />
           {busy && <p className="mb-3 rounded-lg bg-primary/10 px-3 py-2 text-sm">Deployment sedang berjalan… lihat tab Deployment untuk log.</p>}
           <form onSubmit={uploadZip} className="space-y-3">
-            <Field label="Upload ZIP" htmlFor="zip" hint="Isi proyek (boleh dalam satu folder). .git, node_modules, dan .env dilewati otomatis.">
+            {looseFiles && (
+              <div role="radiogroup" aria-label="Jenis upload" className="flex flex-wrap gap-2">
+                {(
+                  [
+                    ["files", "File"],
+                    ["folder", "Folder"],
+                    ["zip", "ZIP"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    role="radio"
+                    aria-checked={mode === key}
+                    disabled={deploy.busy}
+                    onClick={() => chooseMode(key)}
+                    className={cx(
+                      "rounded-lg border px-3 py-1.5 text-sm",
+                      mode === key ? "border-primary bg-primary/10 text-ink" : "border-line text-ink-2 hover:bg-surface",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <Field
+              label={activeMode === "zip" ? "Upload ZIP" : activeMode === "folder" ? "Pilih folder website" : "Pilih file website"}
+              htmlFor="site-upload"
+              hint={
+                activeMode === "zip"
+                  ? "Isi proyek (boleh dalam satu folder). .git, node_modules, dan .env dilewati otomatis."
+                  : activeMode === "folder"
+                    ? "Seluruh isi folder diunggah dengan struktur aslinya. Document root (root, dist, build, atau subfolder) dideteksi otomatis."
+                    : "Satu index.html saja, atau beberapa file (HTML, CSS, JS, gambar, font)."
+              }
+            >
               <input
+                key={activeMode}
                 ref={fileRef}
-                id="zip"
+                id="site-upload"
                 type="file"
-                accept=".zip,application/zip"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                {...(activeMode === "zip" ? { accept: ".zip,application/zip" } : {})}
+                {...(activeMode === "files" ? { multiple: true } : {})}
+                {...(activeMode === "folder" ? ({ webkitdirectory: "", multiple: true } as object) : {})}
+                onChange={(e) => {
+                  deploy.setError(null);
+                  if (activeMode === "zip") setFile(e.target.files?.[0] ?? null);
+                  else setPicked(pick(e.target.files));
+                }}
                 className={cx(inputCls, "file:mr-3 file:rounded-md file:border-0 file:bg-surface file:px-3 file:py-1 file:text-sm file:text-ink")}
               />
             </Field>
-            <Button type="submit" icon={Upload} disabled={!file || deploy.busy || busy} aria-describedby="zip-why">
-              {deploy.busy ? "Mengunggah…" : file ? `Deploy ${file.name} (${bytes(file.size)})` : "Deploy ZIP"}
+            {activeMode !== "zip" && picked.files.length > 0 && (
+              <div className="rounded-lg bg-surface px-3 py-2 text-xs text-ink-2">
+                <p>
+                  {picked.files.length} file · {bytes(pickedBytes)}
+                  {picked.ignored > 0 && ` · ${picked.ignored} dilewati (.git, node_modules, .env)`}
+                </p>
+                <ul className="mt-1 max-h-24 overflow-auto font-mono">
+                  {picked.files.slice(0, 50).map((f) => (
+                    <li key={f.path} className="truncate">
+                      {f.path}
+                    </li>
+                  ))}
+                  {picked.files.length > 50 && <li>… dan {picked.files.length - 50} lainnya</li>}
+                </ul>
+              </div>
+            )}
+            {missingIndex && (
+              <p role="alert" className="flex items-start gap-1.5 text-sm text-bad">
+                index.html tidak ditemukan di pilihan Anda. Sertakan index.html (di root, dist, build, atau satu subfolder proyek).
+              </p>
+            )}
+            {progress && (
+              <div>
+                <div
+                  role="progressbar"
+                  aria-label="Progres upload"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round((progress.bytes / Math.max(progress.totalBytes, 1)) * 100)}
+                  className="h-2 overflow-hidden rounded-full bg-surface"
+                >
+                  <div className="h-full bg-primary transition-[width]" style={{ width: `${(progress.bytes / Math.max(progress.totalBytes, 1)) * 100}%` }} />
+                </div>
+                <p className="mt-1 text-xs text-muted">
+                  {progress.files}/{progress.totalFiles} file · {bytes(progress.bytes)} / {bytes(progress.totalBytes)}
+                </p>
+              </div>
+            )}
+            <Button
+              type="submit"
+              icon={Upload}
+              disabled={(activeMode === "zip" ? !file : !picked.files.length || missingIndex) || deploy.busy || busy}
+              aria-describedby="zip-why"
+            >
+              {deploy.busy
+                ? progress && progress.files < progress.totalFiles
+                  ? "Mengunggah…"
+                  : "Memvalidasi…"
+                : activeMode === "zip"
+                  ? file
+                    ? `Deploy ${file.name} (${bytes(file.size)})`
+                    : "Deploy ZIP"
+                  : picked.files.length
+                    ? `Deploy ${picked.files.length} file (${bytes(pickedBytes)})`
+                    : activeMode === "folder"
+                      ? "Deploy folder"
+                      : "Deploy file"}
             </Button>
             <p id="zip-why" className="text-xs text-muted">
               {deploy.busy
-                ? "Sedang mengunggah…"
+                ? "Sedang mengunggah dan memvalidasi…"
                 : busy
                   ? "Tombol nonaktif: masih ada deployment yang berjalan untuk aplikasi ini."
-                  : !file
-                    ? "Tombol aktif setelah Anda memilih file .zip di atas."
-                    : file.name.toLowerCase().endsWith(".zip")
-                      ? "Siap di-deploy."
-                      : "File ini bukan .zip; server akan menolaknya."}
+                  : activeMode === "zip"
+                    ? !file
+                      ? "Tombol aktif setelah Anda memilih file .zip di atas."
+                      : file.name.toLowerCase().endsWith(".zip")
+                        ? "Siap di-deploy."
+                        : "File ini bukan .zip; server akan menolaknya."
+                    : !picked.files.length
+                      ? "Tombol aktif setelah Anda memilih file atau folder di atas."
+                      : missingIndex
+                        ? "Tombol nonaktif: index.html tidak ditemukan."
+                        : "Siap di-deploy. Rilis aktif baru diganti setelah validasi berhasil."}
             </p>
           </form>
           {app.repo && (
@@ -370,7 +501,10 @@ const TUNNEL_LABEL = { configured: "Ingress → gateway", missing: "Belum ada in
 function Domains({ app, refresh }: Props) {
   const [text, setText] = useState(app.domains.join("\n"));
   const save = useMutation();
+  const resync = useMutation();
+  const [sync, setSync] = useState<DomainSyncResult[] | null>(null);
   const status = usePoll<DomainStatus>(`/hosting/apps/${app.id}/domains/status`, 300_000);
+  const cf = status.data?.cloudflare;
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1.3fr]">
@@ -380,21 +514,66 @@ function Domains({ app, refresh }: Props) {
           onSubmit={async (e) => {
             e.preventDefault();
             const domains = text.split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
-            if (await save.run(() => api(`/hosting/apps/${app.id}/domains`, { method: "PUT", json: { domains } }))) {
+            const res = await save.run(() => api<{ cloudflare: DomainSyncResult[] }>(`/hosting/apps/${app.id}/domains`, { method: "PUT", json: { domains } }));
+            if (res) {
+              setSync(res.data?.cloudflare ?? null);
               refresh();
               status.refresh();
             }
           }}
           className="space-y-3"
         >
-          <Field label="Satu domain per baris (maks. 5)" htmlFor="domains" hint="drive./panel.nifserver.cloud dicadangkan. Wildcard DNS tidak diasumsikan.">
+          <Field
+            label="Satu domain per baris (maks. 5)"
+            htmlFor="domains"
+            hint={
+              cf?.configured
+                ? `DNS di zona ${cf.zone ?? "Cloudflare"} dibuat/dihapus otomatis saat disimpan. drive./panel.nifserver.cloud dicadangkan.`
+                : "drive./panel.nifserver.cloud dicadangkan. Integrasi Cloudflare belum diaktifkan (lihat deploy/hosting/README.md)."
+            }
+          >
             <textarea id="domains" rows={4} value={text} onChange={(e) => setText(e.target.value)} className={cx(inputCls, "font-mono")} />
           </Field>
           <InlineError message={save.error} />
-          <Button type="submit" icon={Save} disabled={save.busy}>
-            Simpan domain
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button type="submit" icon={Save} disabled={save.busy}>
+              {save.busy ? "Menyimpan…" : "Simpan domain"}
+            </Button>
+            {cf?.configured && app.domains.length > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                icon={RefreshCw}
+                disabled={resync.busy}
+                onClick={async () => {
+                  const res = await resync.run(() => api<DomainSyncResult[]>(`/hosting/apps/${app.id}/domains/sync`, { method: "POST", json: {} }));
+                  if (res) {
+                    setSync(res.data ?? null);
+                    status.refresh();
+                  }
+                }}
+              >
+                {resync.busy ? "Menyinkronkan…" : "Sinkronkan ke Cloudflare"}
+              </Button>
+            )}
+          </div>
+          <InlineError message={resync.error} />
         </form>
+        {sync && sync.length > 0 && (
+          <ul className="mt-4 space-y-1.5 text-sm" aria-label="Hasil sinkronisasi Cloudflare">
+            {sync.map((r) => (
+              <li key={r.domain} className="rounded-lg bg-surface px-3 py-2">
+                <p className="font-mono text-xs">{r.domain}</p>
+                {r.error ? <p className="text-xs text-bad">{r.error}</p> : null}
+                {r.steps.map((st) => (
+                  <p key={st} className={cx("text-xs", r.ok ? "text-ok" : "text-muted")}>
+                    {st}
+                  </p>
+                ))}
+              </li>
+            ))}
+          </ul>
+        )}
         <p className="mt-4 text-xs text-muted">
           Tanpa domain, aplikasi tetap bisa dicek lewat gateway dengan host internal <span className="font-mono">{app.internalHost}</span>.
         </p>
@@ -432,15 +611,24 @@ function Domains({ app, refresh }: Props) {
             )}
             <div className="space-y-2 text-sm text-ink-2">
               <p>
-                Dashboard <strong>tidak mengubah</strong> konfigurasi cloudflared, DNS, atau Nginx. Semua domain diarahkan ke gateway hosting{" "}
-                <span className="font-mono text-xs">127.0.0.1:{status.data.gatewayPort}</span>; gateway memilih aplikasi berdasarkan Host.
+                {cf?.configured ? (
+                  <>
+                    Cloudflare <strong>otomatis</strong>: record DNS {cf.ingress ? "dan ingress tunnel " : ""}dikelola dashboard
+                    {cf.ingress ? "." : "; ingress tunnel tetap dari config.yml (pakai rule wildcard, atau salin snippet di bawah)."}
+                  </>
+                ) : (
+                  <>
+                    Dashboard <strong>tidak mengubah</strong> DNS atau tunnel (Cloudflare belum diaktifkan).
+                  </>
+                )}{" "}
+                Semua domain diarahkan ke gateway hosting <span className="font-mono text-xs">127.0.0.1:{status.data.gatewayPort}</span>; gateway memilih aplikasi berdasarkan Host.
               </p>
             </div>
-            {status.data.snippet && (
+            {status.data.snippet && !cf?.ingress && (
               <>
                 <CopyBlock text={status.data.snippet} label="Salin snippet ingress" />
                 <p className="text-sm text-ink-2">Lalu jalankan di server (ganti &lt;nama-tunnel&gt;):</p>
-                <CopyBlock text={status.data.commands.join("\n")} label="Salin perintah" />
+                <CopyBlock text={(cf?.configured ? status.data.commands.filter((c) => !c.startsWith("cloudflared tunnel route dns")) : status.data.commands).join("\n")} label="Salin perintah" />
               </>
             )}
           </div>
@@ -662,7 +850,7 @@ function SettingsTab({ app, refresh }: Props) {
           </Field>
           <Field label="Metode deploy utama" htmlFor="s-method">
             <select id="s-method" value={method} onChange={(e) => setMethod(e.target.value as typeof method)} className={inputCls}>
-              <option value="upload">Upload ZIP</option>
+              <option value="upload">Upload (file, folder, atau ZIP)</option>
               <option value="github">GitHub</option>
             </select>
           </Field>

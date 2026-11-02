@@ -5,6 +5,9 @@ const bool = z
   .enum(["true", "false", "1", "0"])
   .transform((v) => v === "true" || v === "1");
 
+// An empty `KEY=` line in .env means "not set".
+const optional = <T extends z.ZodType>(schema: T) => z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   API_HOST: z.string().default("127.0.0.1"),
@@ -39,6 +42,7 @@ const EnvSchema = z.object({
   HOSTING_PORT_MIN: z.coerce.number().int().min(1024).max(65535).default(4100),
   HOSTING_PORT_MAX: z.coerce.number().int().min(1024).max(65535).default(4199),
   HOSTING_MAX_UPLOAD_MB: z.coerce.number().int().min(1).max(500).default(50),
+  HOSTING_MAX_UPLOAD_FILES: z.coerce.number().int().min(1).max(20000).default(2000),
   HOSTING_MAX_EXTRACTED_MB: z.coerce.number().int().min(1).max(4000).default(300),
   HOSTING_DEPLOY_LIMIT: z.coerce.number().int().min(1).max(1000).default(10),
   // Comma-separated hostnames allowed as git sources (HTTPS only).
@@ -48,6 +52,13 @@ const EnvSchema = z.object({
   HOSTING_BASE_DOMAIN: z.string().default(""),
   HOSTING_CLOUDFLARED_CONFIG: z.string().default("/etc/cloudflared/config.yml"),
   HOSTING_RUNTIME_DIR: z.string().default("/usr/local/lib/nifhost"),
+
+  // ---- Cloudflare automation (optional; see deploy/hosting/README.md) ----
+  // Token scopes: Zone > DNS > Edit (this zone only); add Account > Cloudflare Tunnel > Edit for remotely-managed tunnels.
+  CLOUDFLARE_API_TOKEN: optional(z.string().min(20).max(200)),
+  CLOUDFLARE_ZONE_ID: optional(z.string().regex(/^[a-f0-9]{32}$/, "must be a 32-char hex zone id")),
+  CLOUDFLARE_TUNNEL_ID: optional(z.string().regex(/^[a-f0-9-]{36}$/i, "must be a tunnel UUID").transform((v) => v.toLowerCase())),
+  CLOUDFLARE_ACCOUNT_ID: optional(z.string().regex(/^[a-f0-9]{32}$/, "must be a 32-char hex account id")),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

@@ -11,6 +11,7 @@ import { checkRepoSource, isPublicAddress, normalizeRepoUrl, SourceError } from 
 import { AppId, Branch, envKeyProblem, Hostname } from "../src/hosting/model.js";
 import { httpProbe, isHealthyStatus } from "../src/hosting/health.js";
 import { createRedactor } from "../src/hosting/sanitize.js";
+import { checkUploadExtension, checkUploadPath, detectDocRoot, flattenDocRoot, listFiles, StaticSiteError } from "../src/hosting/staticsite.js";
 import { envLine } from "../src/hosting/secrets.js";
 // @ts-expect-error plain ESM runtime script without type declarations
 import { BINARIES, buildSteps, gitCloneArgs, validatePlan } from "../runtime/builder.mjs";
@@ -351,6 +352,58 @@ describe("gateway", () => {
       expect((await get("/", "unknown.example.com")).status).toBe(404);
     } finally {
       server.close();
+    }
+  });
+});
+
+describe("static site: document root detection", () => {
+  const root = (files: string[], opts?: { promoteLoneHtml?: boolean }) => detectDocRoot(files, opts).root;
+
+  it("prefers the root, then dist/build, then the nearest unique folder", () => {
+    expect(root(["index.html", "dist/index.html"])).toBe(".");
+    expect(root(["src/a.js", "dist/index.html"])).toBe("dist");
+    expect(root(["build/index.html", "x/index.html"])).toBe("build");
+    expect(root(["site/index.html", "site/blog/index.html"])).toBe("site");
+    expect(root(["app/frontend/dist/index.html"])).toBe("app/frontend/dist");
+  });
+
+  it("refuses ambiguous or missing candidates", () => {
+    expect(() => root(["dist/index.html", "build/index.html"])).toThrow(/dist\/, build\//);
+    expect(() => root(["a/index.html", "b/index.html"])).toThrow(/beberapa kandidat/);
+    expect(() => root(["Index.html", "a.css"])).toThrow(/index\.html tidak ditemukan/);
+    expect(() => root(["a/b/c/d/index.html"])).toThrow(/tidak ditemukan/);
+    expect(() => root([])).toThrow(StaticSiteError);
+  });
+
+  it("promotes a lone HTML file only when asked", () => {
+    expect(detectDocRoot(["home.html"], { promoteLoneHtml: true }).renamed).toEqual({ from: "home.html" });
+    expect(() => root(["home.html"])).toThrow(/tidak ditemukan/);
+    expect(() => root(["home.html", "about.html"], { promoteLoneHtml: true })).toThrow(/tidak ditemukan/);
+  });
+
+  it("validates upload paths", () => {
+    for (const bad of ["../x.html", "a/../x.html", "/x.html", "C:/x.html", "a\\x.html", "a//x.html", "a/", "", "a\0.html"]) {
+      expect(() => checkUploadPath(bad), bad).toThrow(StaticSiteError);
+    }
+    expect(checkUploadPath("css/app.css")).toBe("css/app.css");
+    expect(() => checkUploadExtension("run.php")).toThrow(/Ekstensi/);
+    expect(() => checkUploadExtension("Makefile")).toThrow(/Ekstensi/);
+    expect(() => checkUploadExtension("fonts/a.WOFF2")).not.toThrow();
+  });
+
+  it("flattens the document root by moving it up", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flat-"));
+    try {
+      const rel = path.join(dir, "rel");
+      await fs.mkdir(path.join(rel, "dist", "assets"), { recursive: true });
+      await fs.writeFile(path.join(rel, "dist", "index.html"), "i");
+      await fs.writeFile(path.join(rel, "dist", "assets", "a.js"), "a");
+      await fs.writeFile(path.join(rel, "src.js"), "s");
+      expect(await flattenDocRoot(rel, "dist")).toEqual({ removed: 1 });
+      expect(await listFiles(rel)).toEqual(["assets/a.js", "index.html"]);
+      await expect(flattenDocRoot(rel, "../x")).rejects.toThrow(/di luar/);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
     }
   });
 });

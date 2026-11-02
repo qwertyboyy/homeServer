@@ -5,7 +5,7 @@ import { z } from "zod";
 import { authRouter, requireAuth } from "./auth/routes.js";
 import { SessionStore } from "./auth/sessions.js";
 import type { Env } from "./config/env.js";
-import { HOSTING_PREFIX, UPLOAD_PATH, hostingRouter } from "./hosting/routes.js";
+import { HOSTING_PREFIX, hostingRouter, isRawUpload } from "./hosting/routes.js";
 import type { HostingService } from "./hosting/service.js";
 import type { EventLog } from "./lib/events.js";
 import { fail, ok } from "./lib/respond.js";
@@ -35,10 +35,10 @@ export function createApp(env: Env, sources: DataSources, events: EventLog, host
   app.use((req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     // Mutating requests must be JSON: blocks cross-site HTML form posts (CSRF).
-    // The ZIP upload is the one exception; application/zip cannot be sent
-    // cross-site without a CORS preflight, which this API never allows.
-    const zipUpload = req.method === "POST" && UPLOAD_PATH.test(req.path) && req.is("application/zip");
-    if (req.method !== "GET" && req.method !== "HEAD" && !req.is("application/json") && !zipUpload) {
+    // The ZIP and loose-file uploads are the exceptions; application/zip and
+    // application/octet-stream cannot be sent cross-site without a CORS
+    // preflight, which this API never allows.
+    if (req.method !== "GET" && req.method !== "HEAD" && !req.is("application/json") && !isRawUpload(req)) {
       return fail(res, 415, "Content-Type must be application/json");
     }
     next();

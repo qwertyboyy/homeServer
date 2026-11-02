@@ -7,6 +7,7 @@ import type { Env } from "../config/env.js";
 import type { EventLog } from "../lib/events.js";
 import { ArchiveError, defaultLimits, extractZip, inspectZip, isSkippedPath } from "./archive.js";
 import { AuditLog } from "./audit.js";
+import { Cloudflare, type CloudflareClient, type DomainSyncResult } from "./cloudflare.js";
 import { dnsStatus, hostMatches, readTunnelConfig, tunnelCommands, tunnelSnippet, type DnsStatus } from "./domains.js";
 import type { HostExecutor, UnitAction, UnitState } from "./executor.js";
 import { normalizeModes, treeStats, writeFileAtomic } from "./fsutil.js";
@@ -31,6 +32,7 @@ import { Registry, RegistryConflict } from "./registry.js";
 import { checkOutput, checkSource, RUNTIME_INFO, runEnv, withDefaults } from "./runtimes.js";
 import { clampLog, createRedactor } from "./sanitize.js";
 import { buildEnv, envLine, SecretStore } from "./secrets.js";
+import { checkUploadExtension, checkUploadPath, detectDocRoot, flattenDocRoot, listFiles, StaticSiteError } from "./staticsite.js";
 
 /** Error with an HTTP status and a message that is safe to return to the client. */
 export class HostingError extends Error {
@@ -43,6 +45,8 @@ export class HostingError extends Error {
 }
 
 const KEEP_RELEASES = 5;
+const UPLOAD_TTL_MS = 30 * 60_000;
+const MAX_STAGING_SESSIONS = 4;
 const MAX_RELEASE_BYTES = 2 * 1024 ** 3;
 const INTERNAL_SUFFIX = ".nifhost.internal";
 
@@ -62,6 +66,7 @@ export interface HostingDeps {
   healthTimeoutMs?: number;
   portFree?: (port: number) => Promise<boolean>;
   dnsCheck?: (domain: string) => Promise<DnsStatus>;
+  cloudflare?: CloudflareClient;
 }
 
 const defaultPortFree = (port: number) =>
@@ -76,6 +81,18 @@ type AppStatus = "running" | "starting" | "stopped" | "failed" | "deploying" | "
 const list = (csv: string) => csv.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 const short = (s: string, n = 300) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
+/** A loose-file / folder upload waiting to be committed as a static release. */
+interface Staging {
+  id: string;
+  appId: string;
+  dir: string;
+  createdAt: number;
+  files: Map<string, number>; // relative path -> size
+  reserved: Set<string>; // lower-cased file paths, including in-flight ones
+  dirs: Set<string>; // lower-cased directory paths
+  bytes: number;
+}
+
 export class HostingService {
   readonly paths: HostingPaths;
   readonly registry: Registry;
@@ -85,8 +102,10 @@ export class HostingService {
   private readonly resolver: Resolver;
   private readonly portFree: (port: number) => Promise<boolean>;
   private readonly dnsCheck: (domain: string) => Promise<DnsStatus>;
+  private readonly cloudflare: CloudflareClient;
   private readonly gitHosts: string[];
   private readonly reserved: string[];
+  private uploads = new Map<string, Staging>();
   private busy: { appId: string; deploymentId: string } | null = null;
   private job: Promise<void> = Promise.resolve();
   private health = new Map<string, ProbeResult>();
@@ -103,6 +122,7 @@ export class HostingService {
     this.resolver = deps.resolver ?? systemResolver;
     this.portFree = deps.portFree ?? defaultPortFree;
     this.dnsCheck = deps.dnsCheck ?? dnsStatus;
+    this.cloudflare = deps.cloudflare ?? new Cloudflare(env);
     this.gitHosts = list(env.HOSTING_GIT_HOSTS);
     this.reserved = list(env.HOSTING_RESERVED_HOSTS);
   }
@@ -314,11 +334,17 @@ export class HostingService {
       gatewayPort: port,
       internalHost: this.internalHost(id),
       baseDomain: this.deps.env.HOSTING_BASE_DOMAIN || null,
+      cloudflare: await this.cloudflare.status(),
       tunnelConfig: tunnel.status,
       domains,
       snippet: app.domains.length ? tunnelSnippet(app.domains, port) : null,
       commands: app.domains.length ? tunnelCommands(app.domains) : [],
     };
+  }
+
+  /** What the "new site" wizard needs to offer one-click subdomains. */
+  async overview() {
+    return { baseDomain: this.deps.env.HOSTING_BASE_DOMAIN || null, cloudflare: await this.cloudflare.status() };
   }
 
   auditList(limit: number) {
@@ -411,7 +437,8 @@ export class HostingService {
       throw err;
     }
     await this.audit.record(actor, "app.create", app.id, `Aplikasi dibuat (${RUNTIME_INFO[app.runtime].label}, deploy ${app.deployMethod})`);
-    return this.getApp(app.id);
+    const cloudflare = await this.syncCloudflare(app.id, app.domains, [], actor);
+    return { ...(await this.getApp(app.id)), cloudflare };
   }
 
   async updateApp(id: string, body: z.infer<typeof UpdateAppBody>, actor: string) {
@@ -438,7 +465,26 @@ export class HostingService {
     await this.registry.update(id, (a) => ({ ...a, domains }));
     await this.writeRoutes();
     await this.audit.record(actor, "domain.update", id, `Domain diubah: ${app.domains.join(", ") || "-"} → ${domains.join(", ") || "-"}`);
-    return this.getApp(id);
+    const added = domains.filter((d) => !app.domains.includes(d));
+    const removed = app.domains.filter((d) => !domains.includes(d));
+    const cloudflare = await this.syncCloudflare(id, added, removed, actor);
+    return { ...(await this.getApp(id)), cloudflare };
+  }
+
+  /** Re-applies Cloudflare DNS/ingress for the app's current domains (retry after a failed sync). */
+  async syncDomains(id: string, actor: string) {
+    const app = this.requireApp(id);
+    return this.syncCloudflare(id, app.domains, [], actor);
+  }
+
+  /** Best effort: the domain list is already saved, so a Cloudflare problem is reported, never rolled back. */
+  private async syncCloudflare(id: string, add: string[], remove: string[], actor: string): Promise<DomainSyncResult[]> {
+    if (!add.length && !remove.length) return [];
+    const results = await this.cloudflare.sync(add, remove);
+    for (const r of results) {
+      await this.audit.record(actor, "domain.cloudflare", id, `${r.domain}: ${r.error ?? r.steps.join("; ")}`, r.ok ? "info" : "warning");
+    }
+    return results;
   }
 
   async setEnv(id: string, body: z.infer<typeof EnvBody>, actor: string) {
@@ -526,6 +572,7 @@ export class HostingService {
     await this.registry.update(id, () => null);
     await fs.rm(this.paths.app(id), { recursive: true, force: true }).catch(() => console.error(`[hosting] could not fully remove ${id}`));
     this.health.delete(id);
+    await this.syncCloudflare(id, [], app.domains, actor);
     await this.audit.record(actor, "app.delete", id, `Aplikasi dihapus (${app.releases.length} rilis)`, "warning");
   }
 
@@ -556,15 +603,23 @@ export class HostingService {
     return deploymentId;
   }
 
+  /** Static sites uploaded as files/ZIP get their document root detected; a custom outputDir opts out. */
+  private autoDocRoot(app: AppRecord) {
+    return app.runtime === "static" && (!app.options.outputDir || app.options.outputDir === ".");
+  }
+
   async deployUpload(id: string, zipPath: string, actor: string) {
     let app: AppRecord;
+    const limits = defaultLimits(this.deps.env.HOSTING_MAX_EXTRACTED_MB * 1024 * 1024);
     try {
       app = this.requireApp(id);
       // Validate the whole central directory before accepting the job.
-      await inspectZip(zipPath, defaultLimits(this.deps.env.HOSTING_MAX_EXTRACTED_MB * 1024 * 1024));
+      const plan = await inspectZip(zipPath, limits);
+      // A static site without a findable index.html is rejected here, before anything is built or activated.
+      if (this.autoDocRoot(app)) detectDocRoot(plan.entries.filter((e) => !e.dir).map((e) => e.name));
     } catch (err) {
       await fs.rm(zipPath, { force: true });
-      if (err instanceof ArchiveError) {
+      if (err instanceof ArchiveError || err instanceof StaticSiteError) {
         await this.audit.record(actor, "deploy.rejected", id, `Upload ZIP ditolak: ${short(err.message, 160)}`, "warning");
         throw new HostingError(400, err.message);
       }
@@ -579,12 +634,141 @@ export class HostingService {
     }
     return this.startDeploy(app, deploymentId, "upload", actor, async (dir, log) => {
       try {
-        const r = await extractZip(zipPath, dir, defaultLimits(this.deps.env.HOSTING_MAX_EXTRACTED_MB * 1024 * 1024));
-        await normalizeModes(dir);
+        const r = await extractZip(zipPath, dir, limits);
         await log(`Arsip diekstrak: ${r.files} file, ${(r.bytes / 1048576).toFixed(1)} MB${r.skipped ? `, ${r.skipped} entri dilewati (.git, node_modules, .env)` : ""}${r.stripped ? `, folder induk "${r.stripped}" dilepas` : ""}`);
+        if (this.autoDocRoot(app)) {
+          const found = detectDocRoot(await listFiles(dir));
+          const { removed } = await flattenDocRoot(dir, found.root);
+          await log(`${found.note}${removed ? `; ${removed} file di luar document root tidak disertakan` : ""}`);
+        }
+        await normalizeModes(dir);
         return null;
       } finally {
         await fs.rm(zipPath, { force: true });
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------ loose file / folder uploads
+
+  private async discardUpload(st: Staging) {
+    this.uploads.delete(st.id);
+    await fs.rm(st.dir, { recursive: true, force: true });
+  }
+
+  private async sweepUploads() {
+    const now = Date.now();
+    for (const st of [...this.uploads.values()]) if (now - st.createdAt > UPLOAD_TTL_MS) await this.discardUpload(st);
+  }
+
+  private requireUpload(appId: string, uploadId: string) {
+    const st = this.uploads.get(uploadId);
+    if (!st || st.appId !== appId) throw new HostingError(404, "Sesi upload tidak ditemukan atau sudah kedaluwarsa");
+    return st;
+  }
+
+  get uploadLimits() {
+    const bytes = this.deps.env.HOSTING_MAX_UPLOAD_MB * 1024 * 1024;
+    return { maxFiles: this.deps.env.HOSTING_MAX_UPLOAD_FILES, maxBytes: bytes, maxFileBytes: bytes };
+  }
+
+  /** Opens a staging area for file/folder uploads. Only static sites accept loose files. */
+  async beginUpload(id: string) {
+    const app = this.requireApp(id);
+    if (app.runtime !== "static") {
+      throw new HostingError(400, "Upload file/folder hanya untuk Website statis; gunakan ZIP atau GitHub untuk runtime ini");
+    }
+    await this.sweepUploads();
+    for (const st of [...this.uploads.values()]) if (st.appId === id) await this.discardUpload(st);
+    if (this.uploads.size >= MAX_STAGING_SESSIONS) throw new HostingError(429, "Terlalu banyak sesi upload aktif; coba lagi sebentar");
+    const uploadId = crypto.randomUUID();
+    const dir = path.join(this.paths.tmp, "uploads", uploadId);
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    this.uploads.set(uploadId, { id: uploadId, appId: id, dir, createdAt: Date.now(), files: new Map(), reserved: new Set(), dirs: new Set(), bytes: 0 });
+    return { uploadId, ...this.uploadLimits, expiresInSeconds: UPLOAD_TTL_MS / 1000 };
+  }
+
+  /**
+   * Validates and reserves one path inside a staging area. Returns where the
+   * body must be written and how many bytes it may use.
+   */
+  stageFile(appId: string, uploadId: string, rawPath: unknown) {
+    const st = this.requireUpload(appId, uploadId);
+    let rel: string;
+    try {
+      rel = checkUploadPath(rawPath);
+      if (isSkippedPath(rel)) return { skipped: true as const, rel };
+      checkUploadExtension(rel);
+    } catch (err) {
+      throw new HostingError(400, err instanceof Error ? err.message : "Path tidak valid");
+    }
+    const limits = this.uploadLimits;
+    if (st.reserved.size >= limits.maxFiles) throw new HostingError(413, `Jumlah file melebihi batas ${limits.maxFiles}`);
+    const parts = rel.toLowerCase().split("/");
+    const key = parts.join("/");
+    const parents = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+    if (st.reserved.has(key) || st.dirs.has(key)) throw new HostingError(409, `File duplikat: ${rel}`);
+    if (parents.some((p) => st.reserved.has(p))) throw new HostingError(409, `Konflik file/folder: ${rel}`);
+    const target = path.resolve(st.dir, ...rel.split("/"));
+    if (!target.startsWith(path.resolve(st.dir) + path.sep)) throw new HostingError(400, "Path keluar dari folder upload");
+    st.reserved.add(key);
+    for (const p of parents) st.dirs.add(p);
+    return { skipped: false as const, rel, key, target, maxBytes: Math.max(0, Math.min(limits.maxFileBytes, limits.maxBytes - st.bytes)) };
+  }
+
+  stagedFileDone(appId: string, uploadId: string, rel: string, size: number) {
+    const st = this.requireUpload(appId, uploadId);
+    st.bytes += size;
+    st.files.set(rel, size);
+  }
+
+  stagedFileFailed(uploadId: string, key: string) {
+    this.uploads.get(uploadId)?.reserved.delete(key);
+  }
+
+  async cancelUpload(appId: string, uploadId: string) {
+    await this.discardUpload(this.requireUpload(appId, uploadId));
+  }
+
+  /** Validates the staged files, then builds a release from them. The active release is untouched on any failure. */
+  async deployStaged(id: string, uploadId: string, actor: string) {
+    const app = this.requireApp(id);
+    const st = this.requireUpload(id, uploadId);
+    if (Date.now() - st.createdAt > UPLOAD_TTL_MS) {
+      await this.discardUpload(st);
+      throw new HostingError(404, "Sesi upload tidak ditemukan atau sudah kedaluwarsa");
+    }
+    let found: ReturnType<typeof detectDocRoot>;
+    try {
+      found = detectDocRoot([...st.files.keys()].sort(), { promoteLoneHtml: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Validasi gagal";
+      await this.audit.record(actor, "deploy.rejected", id, `Upload file ditolak: ${short(message, 160)}`, "warning");
+      throw new HostingError(400, message);
+    }
+    const deploymentId = this.claim(app);
+    return this.startDeploy(app, deploymentId, "upload", actor, async (dir, log) => {
+      try {
+        const prefix = found.root === "." ? "" : `${found.root}/`;
+        const base = path.resolve(dir);
+        let moved = 0;
+        let bytes = 0;
+        for (const [rel, size] of st.files) {
+          if (!rel.startsWith(prefix)) continue;
+          const dest = found.renamed ? "index.html" : rel.slice(prefix.length);
+          const target = path.resolve(base, ...dest.split("/"));
+          if (!target.startsWith(base + path.sep)) throw new Error("Path keluar dari folder rilis");
+          await fs.mkdir(path.dirname(target), { recursive: true });
+          await fs.rename(path.join(st.dir, ...rel.split("/")), target);
+          moved++;
+          bytes += size;
+        }
+        await normalizeModes(dir);
+        await log(found.note);
+        await log(`File dipindahkan ke rilis: ${moved} file, ${(bytes / 1048576).toFixed(1)} MB${moved < st.files.size ? `; ${st.files.size - moved} file di luar document root tidak disertakan` : ""}`);
+        return null;
+      } finally {
+        await this.discardUpload(st);
       }
     });
   }

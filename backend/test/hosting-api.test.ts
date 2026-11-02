@@ -8,6 +8,7 @@ import request from "supertest";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { loadEnv } from "../src/config/env.js";
+import type { CloudflareClient } from "../src/hosting/cloudflare.js";
 import { SimulatedExecutor, SystemdExecutor, type HostExecutor, type UnitAction } from "../src/hosting/executor.js";
 import { HostingPaths } from "../src/hosting/paths.js";
 import { HostingService } from "../src/hosting/service.js";
@@ -52,7 +53,7 @@ afterEach(async () => {
   for (const r of roots.splice(0)) await fs.rm(r, { recursive: true, force: true });
 });
 
-async function setup(envOver: Record<string, string> = {}, executorFactory?: (p: HostingPaths) => HostExecutor) {
+async function setup(envOver: Record<string, string> = {}, executorFactory?: (p: HostingPaths) => HostExecutor, cloudflare?: CloudflareClient) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nifhost-"));
   roots.push(root);
   const env = loadEnv({
@@ -75,6 +76,7 @@ async function setup(envOver: Record<string, string> = {}, executorFactory?: (p:
     resolver: async (host) => (host === "github.com" ? ["140.82.112.3"] : ["10.0.0.1"]),
     portFree: async () => true,
     dnsCheck: async () => ({ status: "missing", detail: null }),
+    cloudflare,
     healthTimeoutMs: 20,
   });
   await service.init();
@@ -510,5 +512,367 @@ describe("hosting: existing NIFSERVER services are never touched", () => {
       for (const u of units) expect(u).toMatch(/^(nifapp@api\.service|nifbuild@api\.service|nifhost-gateway\.service)$/);
       expect(argv[0] === "show" || argv[0] === "--no-ask-password").toBe(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------- static site: file / folder / ZIP upload
+
+type Files = Record<string, string | Buffer>;
+const base = (id: string) => `/api/v1/hosting/apps/${id}`;
+
+async function beginStage(c: Ctx, id: string) {
+  const res = await request(c.app).post(`${base(id)}/uploads`).set("Cookie", c.cookie).send({});
+  expect(res.status, JSON.stringify(res.body)).toBe(201);
+  return res.body.data.uploadId as string;
+}
+const putFile = (c: Ctx, id: string, uploadId: string, rel: string, body: string | Buffer, type = "application/octet-stream") =>
+  request(c.app).put(`${base(id)}/uploads/${uploadId}/file`).query({ path: rel }).set("Cookie", c.cookie).set("Content-Type", type).send(body);
+const commit = (c: Ctx, id: string, uploadId: string) => request(c.app).post(`${base(id)}/uploads/${uploadId}/commit`).set("Cookie", c.cookie).send({});
+
+/** Stages every file, then commits. Returns the commit response. */
+async function stageAndCommit(c: Ctx, id: string, files: Files) {
+  const uploadId = await beginStage(c, id);
+  for (const [rel, body] of Object.entries(files)) {
+    const r = await putFile(c, id, uploadId, rel, body);
+    expect(r.status, `${rel}: ${JSON.stringify(r.body)}`).toBe(200);
+  }
+  const res = await commit(c, id, uploadId);
+  if (res.status === 202) await c.service.waitIdle();
+  return { res, uploadId };
+}
+
+const staticApp = async (c: Ctx, id = "web") => {
+  await create(c, { id, name: "Web", runtime: "static", deployMethod: "upload", domains: [`${id}.example.com`] }).expect(201);
+  return id;
+};
+const releaseFile = async (c: Ctx, id: string, rel: string) => {
+  const app = await getApp(c, id);
+  return fs.readFile(path.join(c.paths.release(id, app.activeRelease.id), ...rel.split("/")), "utf8");
+};
+const releaseExists = async (c: Ctx, id: string, rel: string) => {
+  const app = await getApp(c, id);
+  return fs.access(path.join(c.paths.release(id, app.activeRelease.id), ...rel.split("/"))).then(() => true, () => false);
+};
+
+/** Streams up to 3 MB with no Content-Length (chunked) and stops once the server answers. */
+async function rawPut(c: Ctx, id: string, uploadId: string, rel: string) {
+  const server = c.app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await new Promise<number>((resolve, reject) => {
+      const headers = { "Content-Type": "application/octet-stream", Cookie: c.cookie.map((s) => s.split(";")[0]).join("; ") };
+      const req = http.request({ host: "127.0.0.1", port, method: "PUT", path: `${base(id)}/uploads/${uploadId}/file?path=${encodeURIComponent(rel)}`, headers });
+      let answered = false;
+      req.on("response", (res) => {
+        answered = true;
+        res.resume();
+        resolve(res.statusCode!);
+        req.destroy();
+      });
+      req.on("error", (e) => (answered ? undefined : reject(e)));
+      const chunk = Buffer.alloc(64 * 1024);
+      let sent = 0;
+      const pump = () => {
+        while (!answered && sent < 3 * 1024 * 1024) {
+          sent += chunk.length;
+          if (!req.write(chunk)) return void req.once("drain", pump);
+        }
+        if (!answered) req.end();
+      };
+      pump();
+    });
+  } finally {
+    server.close();
+  }
+}
+
+describe("hosting: static site upload without ZIP", () => {
+  it("deploys a single index.html", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const { res } = await stageAndCommit(c, id, { "index.html": "<h1>solo</h1>" });
+    expect(res.status).toBe(202);
+    const app = await getApp(c, id);
+    expect(app.deployments[0]).toMatchObject({ status: "succeeded", method: "upload" });
+    expect(await releaseFile(c, id, "index.html")).toBe("<h1>solo</h1>");
+    expect((await routes(c))["web.example.com"]).toMatchObject({ type: "static", root: c.paths.release(id, app.activeRelease.id) });
+  });
+
+  it("serves a lone HTML file with another name as index.html", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const { res } = await stageAndCommit(c, id, { "home.html": "<h1>home</h1>" });
+    expect(res.status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("<h1>home</h1>");
+  });
+
+  it("keeps relative structure for several files", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]);
+    const { res } = await stageAndCommit(c, id, {
+      "index.html": '<link rel="stylesheet" href="css/app.css"><script src="js/app.js"></script>',
+      "css/app.css": "body{}",
+      "js/app.js": "1",
+      "img/logo.png": png,
+      "empty.txt": "",
+    });
+    expect(res.status).toBe(202);
+    expect(await releaseFile(c, id, "css/app.css")).toBe("body{}");
+    expect(await releaseFile(c, id, "js/app.js")).toBe("1");
+    const app = await getApp(c, id);
+    expect(await fs.readFile(path.join(c.paths.release(id, app.activeRelease.id), "img", "logo.png"))).toEqual(png);
+    expect(await releaseExists(c, id, "empty.txt")).toBe(true);
+  });
+
+  it("uses the selected folder name as document root for folder uploads", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const { res } = await stageAndCommit(c, id, { "mysite/index.html": "<p>folder</p>", "mysite/assets/a.css": "a{}", "mysite/.env": "SECRET=1" });
+    expect(res.status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("<p>folder</p>");
+    expect(await releaseFile(c, id, "assets/a.css")).toBe("a{}");
+    expect(await releaseExists(c, id, ".env")).toBe(false);
+  });
+
+  it("detects dist/ in a folder upload and leaves out files outside it", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const { res } = await stageAndCommit(c, id, { "proj/dist/index.html": "built", "proj/dist/app.js": "x", "proj/src.js": "source" });
+    expect(res.status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("built");
+    expect(await releaseExists(c, id, "src.js")).toBe(false);
+  });
+
+  it("rejects a commit without index.html and keeps the active release", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    await deploy(c, id, site("live"));
+    const before = (await getApp(c, id)).activeRelease.id;
+
+    const { res, uploadId } = await stageAndCommit(c, id, { "about.html": "a", "contact.html": "b" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/index\.html tidak ditemukan/);
+    const after = await getApp(c, id);
+    expect(after.activeRelease.id).toBe(before);
+    expect(after.deployments).toHaveLength(1);
+    expect(await releaseFile(c, id, "index.html")).toBe("live");
+
+    // The session survives a failed validation: add the missing page and retry.
+    expect((await putFile(c, id, uploadId, "index.html", "fixed")).status).toBe(200);
+    expect((await commit(c, id, uploadId)).status).toBe(202);
+    await c.service.waitIdle();
+    expect(await releaseFile(c, id, "index.html")).toBe("fixed");
+  });
+
+  it("rejects ambiguous index.html candidates with a clear message", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const { res } = await stageAndCommit(c, id, { "a/index.html": "a", "b/index.html": "b" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/beberapa kandidat index\.html \(a\/, b\/\)/);
+  });
+
+  it("rejects traversal, absolute paths, backslashes and forbidden extensions", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const uploadId = await beginStage(c, id);
+    for (const bad of ["../escape.html", "a/../../x.html", "/etc/passwd.txt", "C:/x.html", "a\\b.html", "a//b.html", "./x.html", "shell.php", "run.sh", "app.exe", "noext", "a/b/"]) {
+      const r = await putFile(c, id, uploadId, bad, "x");
+      expect(r.status, bad).toBe(400);
+    }
+    expect((await request(c.app).put(`${base(id)}/uploads/${uploadId}/file`).set("Cookie", c.cookie).set("Content-Type", "application/octet-stream").send("x")).status).toBe(400);
+    expect(await fs.readdir(path.join(c.paths.tmp, "uploads", uploadId))).toEqual([]);
+  });
+
+  it("rejects duplicates and file/folder conflicts", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const uploadId = await beginStage(c, id);
+    expect((await putFile(c, id, uploadId, "a.html", "1")).status).toBe(200);
+    expect((await putFile(c, id, uploadId, "A.html", "2")).status).toBe(409);
+    expect((await putFile(c, id, uploadId, "css/app.css", "1")).status).toBe(200);
+    expect((await putFile(c, id, uploadId, "css", "x", "application/octet-stream")).status).toBe(400); // no extension
+    expect((await putFile(c, id, uploadId, "a.html/x.css", "1")).status).toBe(409);
+  });
+
+  it("skips .git, node_modules and .env files without storing them", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const uploadId = await beginStage(c, id);
+    for (const p of [".git/config.txt", "node_modules/x/index.js", ".env.txt"]) {
+      const r = await putFile(c, id, uploadId, p, "x");
+      expect(r.status, p).toBe(200);
+    }
+    expect((await putFile(c, id, uploadId, ".git/config.txt", "x")).body.data.skipped).toBe(true);
+    expect(await fs.readdir(path.join(c.paths.tmp, "uploads", uploadId))).toEqual([]);
+  });
+
+  it("enforces file count and size limits", async () => {
+    const c = await setup({ HOSTING_MAX_UPLOAD_FILES: "2", HOSTING_MAX_UPLOAD_MB: "1" });
+    const id = await staticApp(c);
+    const uploadId = await beginStage(c, id);
+    expect((await putFile(c, id, uploadId, "a.html", "1")).status).toBe(200);
+    expect((await putFile(c, id, uploadId, "b.css", "1")).status).toBe(200);
+    expect((await putFile(c, id, uploadId, "c.js", "1")).status).toBe(413);
+
+    const second = await beginStage(c, id);
+    expect(await rawPut(c, id, second, "big.html")).toBe(413);
+    expect(await fs.readdir(path.join(c.paths.tmp, "uploads", second))).toEqual([]);
+    expect((await putFile(c, id, second, "ok.html", Buffer.alloc(600 * 1024))).status).toBe(200);
+    // Total budget is shared by the whole session.
+    expect(await rawPut(c, id, second, "ok2.html")).toBe(413);
+  });
+
+  it("only accepts loose files for static sites, via octet-stream, in the owning session", async () => {
+    const c = await setup();
+    await create(c, { id: "spa", name: "SPA", runtime: "vite", deployMethod: "upload" }).expect(201);
+    expect((await request(c.app).post(`${base("spa")}/uploads`).set("Cookie", c.cookie).send({})).status).toBe(400);
+
+    const id = await staticApp(c);
+    const uploadId = await beginStage(c, id);
+    // Form-style content types are refused (CSRF guard).
+    expect((await putFile(c, id, uploadId, "a.html", "x", "text/plain")).status).toBe(415);
+    expect((await putFile(c, id, uploadId, "a.html", "x", "multipart/form-data; boundary=x")).status).toBe(415);
+    // Another app cannot use this session.
+    await staticApp(c, "other");
+    expect((await putFile(c, "other", uploadId, "a.html", "x")).status).toBe(404);
+    expect((await commit(c, "other", uploadId)).status).toBe(404);
+    // Unauthenticated access.
+    expect((await request(c.app).post(`${base(id)}/uploads`).send({})).status).toBe(401);
+    expect((await request(c.app).put(`${base(id)}/uploads/${uploadId}/file`).query({ path: "a.html" }).set("Content-Type", "application/octet-stream").send("x")).status).toBe(401);
+  });
+
+  it("cancelling discards the staged files", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const uploadId = await beginStage(c, id);
+    await putFile(c, id, uploadId, "index.html", "x");
+    await request(c.app).delete(`${base(id)}/uploads/${uploadId}`).set("Cookie", c.cookie).send({}).expect(200);
+    expect(await fs.readdir(path.join(c.paths.tmp, "uploads"))).toEqual([]);
+    expect((await commit(c, id, uploadId)).status).toBe(404);
+  });
+});
+
+describe("hosting: static site ZIP document root", () => {
+  const zipDeploy = async (c: Ctx, id: string, entries: { name: string; data?: string }[]) => {
+    const res = await upload(c, id, makeZip(entries));
+    if (res.status === 202) await c.service.waitIdle();
+    return res;
+  };
+
+  it("deploys a ZIP with index.html at the root", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    expect((await zipDeploy(c, id, [{ name: "index.html", data: "root" }, { name: "css/a.css", data: "c" }])).status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("root");
+    expect(await releaseFile(c, id, "css/a.css")).toBe("c");
+  });
+
+  it("strips a single wrapper folder", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    expect((await zipDeploy(c, id, [{ name: "site/index.html", data: "wrapped" }, { name: "site/a.js", data: "j" }])).status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("wrapped");
+  });
+
+  it("uses dist/ as document root", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const res = await zipDeploy(c, id, [
+      { name: "package.json", data: "{}" },
+      { name: "src/main.js", data: "src" },
+      { name: "dist/index.html", data: "built" },
+      { name: "dist/assets/app.js", data: "bundle" },
+    ]);
+    expect(res.status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("built");
+    expect(await releaseFile(c, id, "assets/app.js")).toBe("bundle");
+    expect(await releaseExists(c, id, "package.json")).toBe(false);
+    expect(await releaseExists(c, id, "dist/index.html")).toBe(false);
+  });
+
+  it("uses build/ and a wrapper folder around dist/", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    expect((await zipDeploy(c, id, [{ name: "app/build/index.html", data: "b" }, { name: "app/README.md", data: "r" }])).status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("b");
+  });
+
+  it("detects an unambiguous project subfolder", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    expect((await zipDeploy(c, id, [{ name: "README.md", data: "r" }, { name: "website/index.html", data: "sub" }])).status).toBe(202);
+    expect(await releaseFile(c, id, "index.html")).toBe("sub");
+  });
+
+  it("rejects a ZIP without index.html and keeps the active release", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    await deploy(c, id, site("live"));
+    const before = (await getApp(c, id)).activeRelease.id;
+    const res = await zipDeploy(c, id, [{ name: "about.html", data: "a" }, { name: "css/a.css", data: "c" }]);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/index\.html tidak ditemukan/);
+    const after = await getApp(c, id);
+    expect(after.activeRelease.id).toBe(before);
+    expect(await releaseFile(c, id, "index.html")).toBe("live");
+    expect(await fs.readdir(c.paths.tmp)).not.toContainEqual(expect.stringMatching(/\.zip$/));
+  });
+
+  it("rejects a ZIP with ambiguous candidates (dist and build)", async () => {
+    const c = await setup();
+    const id = await staticApp(c);
+    const res = await zipDeploy(c, id, [{ name: "dist/index.html", data: "d" }, { name: "build/index.html", data: "b" }]);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/dist\/, build\//);
+  });
+
+  it("does not change ZIP handling for non-static runtimes", async () => {
+    const c = await setup();
+    await create(c, { id: "spa", name: "SPA", runtime: "vite", deployMethod: "upload" }).expect(201);
+    expect((await zipDeploy(c, "spa", [{ name: "package.json", data: JSON.stringify({ scripts: { build: "vite build" } }) }, { name: "src/main.js", data: "x" }])).status).toBe(202);
+    expect((await getApp(c, "spa")).deployments[0].status).toBe("succeeded");
+  });
+});
+
+describe("cloudflare domain sync", () => {
+  it("syncs added/removed domains, reports failures without rolling back, and retries on demand", async () => {
+    const calls: { add: string[]; remove: string[] }[] = [];
+    let failing = false;
+    const cf: CloudflareClient = {
+      status: async () => ({ configured: true, dns: true, ingress: false, zone: "example.com", tunnelTarget: "t.cfargotunnel.com" }),
+      sync: async (add, remove) => {
+        calls.push({ add, remove });
+        return [...add, ...remove].map((domain) => ({ domain, ok: !failing, steps: failing ? [] : ["ok"], error: failing ? "boom" : null }));
+      },
+    };
+    const c = await setup({}, undefined, cf);
+    const base = { id: "web", name: "Web", runtime: "static", deployMethod: "upload" };
+    const made = await create(c, { ...base, domains: ["a.example.com"] }).expect(201);
+    expect(made.body.data.cloudflare).toEqual([{ domain: "a.example.com", ok: true, steps: ["ok"], error: null }]);
+
+    failing = true;
+    const put = await request(c.app).put("/api/v1/hosting/apps/web/domains").set("Cookie", c.cookie).send({ domains: ["b.example.com"] }).expect(200);
+    expect(calls[1]).toEqual({ add: ["b.example.com"], remove: ["a.example.com"] });
+    expect(put.body.data.cloudflare.every((r: { ok: boolean }) => !r.ok)).toBe(true);
+    expect((await getApp(c, "web")).domains).toEqual(["b.example.com"]); // saved despite the failure
+
+    failing = false;
+    const retry = await request(c.app).post("/api/v1/hosting/apps/web/domains/sync").set("Cookie", c.cookie).send({}).expect(200);
+    expect(calls[2]).toEqual({ add: ["b.example.com"], remove: [] });
+    expect(retry.body.data[0].ok).toBe(true);
+
+    const st = await request(c.app).get("/api/v1/hosting/apps/web/domains/status").set("Cookie", c.cookie).expect(200);
+    expect(st.body.data.cloudflare.zone).toBe("example.com");
+
+    await request(c.app).delete("/api/v1/hosting/apps/web").set("Cookie", c.cookie).send({ confirm: "web" }).expect(200);
+    expect(calls[3]).toEqual({ add: [], remove: ["b.example.com"] });
+  });
+
+  it("requires a session for the sync endpoint", async () => {
+    const c = await setup();
+    await request(c.app).post("/api/v1/hosting/apps/web/domains/sync").send({}).expect(401);
   });
 });

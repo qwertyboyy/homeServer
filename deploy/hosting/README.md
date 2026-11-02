@@ -44,6 +44,13 @@ apps/<id>/secrets/     0700: secrets.json, runtime.env, git-token (0600)
    bentrok, terenkripsi, jumlah entri, ukuran per file & total, rasio kompresi zip bomb), lalu diekstrak dengan pengecekan ulang.
    GitHub: URL HTTPS dari host yang di-allowlist, DNS harus publik, clone `--depth 1` dengan redirect, symlink, hook,
    dan submodule dimatikan, di dalam sandbox yang memblokir jaringan privat (anti DNS rebinding).
+   **Website statis** juga bisa diunggah tanpa ZIP: satu `index.html`, beberapa file, atau satu folder (dikirim file per file ke
+   area staging `tmp/uploads/<sesi>`, lalu di-commit). Path relatif dipertahankan; path traversal/absolut/backslash, ekstensi di luar
+   allowlist web (html, css, js, gambar, font, media, dll.), duplikat, jumlah file (`HOSTING_MAX_UPLOAD_FILES`) dan ukuran
+   (`HOSTING_MAX_UPLOAD_MB` total & per file) ditolak. Sesi kedaluwarsa 30 menit. Runtime lain tetap hanya ZIP/GitHub.
+   **Document root** (ZIP maupun file/folder) dideteksi otomatis: `index.html` di root → `dist/` atau `build/` → satu subfolder
+   proyek yang tidak ambigu (maks. 3 tingkat). Tidak ada `index.html`, atau beberapa kandidat → ditolak (400) dengan pesan jelas
+   sebelum rilis dibuat; rilis aktif tidak berubah. Isi document root menjadi akar rilis, sehingga rollback tetap aman.
 2. `.git`, `node_modules`, `.env*` (kecuali `.env.example`) dibuang; pohon file dicek ulang (tanpa symlink).
 3. **Build** di `nifbuild@<id>` (kecuali situs statis). Gagal → folder rilis dihapus, rilis aktif tetap.
 4. **Aktivasi atomik**: `run.env`, `registry.json`, `routes.json` diganti via write-then-rename; service di-restart.
@@ -52,7 +59,7 @@ apps/<id>/secrets/     0700: secrets.json, runtime.env, git-token (0600)
 6. Simpan rilis aktif + 4 rilis terakhir untuk rollback.
 
 Satu deployment berjalan pada satu waktu (RAM 4 GB). Rate limit: `HOSTING_DEPLOY_LIMIT` deploy / 15 menit,
-60 mutasi / menit; upload maks. `HOSTING_MAX_UPLOAD_MB`.
+60 mutasi / menit; upload maks. `HOSTING_MAX_UPLOAD_MB` (upload file per file tidak kena batas mutasi 60/menit; dibatasi jumlah file per sesi).
 
 ## Instalasi (sekali)
 
@@ -99,7 +106,40 @@ sudo systemctl daemon-reload && sudo systemctl restart nifserver-backend
 
 ## Domain, DNS & Cloudflare Tunnel
 
-Dashboard **tidak** mengubah DNS, Cloudflare, cloudflared, atau Nginx dan **tidak** mengasumsikan wildcard DNS.
+### Otomatis lewat Cloudflare API (opsional, gratis)
+
+Isi variabel `CLOUDFLARE_*` di `.env` backend lalu restart. Setelah itu, setiap domain yang ditambah/dihapus
+di dashboard (wizard *Aplikasi baru* atau tab **Domain**) otomatis:
+
+1. membuat/menghapus record **CNAME proxied** `<domain>` → `<tunnel-id>.cfargotunnel.com` (HTTPS dari Cloudflare);
+2. jika `CLOUDFLARE_ACCOUNT_ID` diisi **dan** tunnel dikelola dari dashboard Cloudflare (*remotely-managed*),
+   menambah/menghapus rule ingress `hostname → http://127.0.0.1:8090` sebelum rule `http_status:404`.
+
+| Variabel | Isi |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | API Token (**bukan** Global API Key). Izin minimum: `Zone → DNS → Edit` pada zona domain Anda saja; tambah `Account → Cloudflare Tunnel → Edit` bila ingin ingress otomatis. |
+| `CLOUDFLARE_ZONE_ID` | Zone ID domain (Overview → kanan bawah). |
+| `CLOUDFLARE_TUNNEL_ID` | UUID tunnel (`cloudflared tunnel list`). |
+| `CLOUDFLARE_ACCOUNT_ID` | Opsional; hanya untuk tunnel remotely-managed. |
+
+Perilaku & batasan:
+
+- Token hanya dibaca backend, tidak pernah dikirim ke browser, dicatat ke log, atau muncul di pesan error.
+- Record yang **sudah ada** dengan nama sama tetapi bukan CNAME ke tunnel ini **tidak ditimpa** (dilaporkan sebagai konflik).
+  Saat menghapus, hanya record yang menunjuk ke tunnel ini yang dihapus.
+- Domain di luar zona (`CLOUDFLARE_ZONE_ID`) dilewati; atur DNS-nya manual.
+- Kegagalan Cloudflare **tidak** membatalkan penyimpanan domain; hasilnya tampil di tab Domain, dicatat di audit,
+  dan bisa dicoba lagi dengan tombol *Sinkronkan ke Cloudflare*.
+- Tunnel yang memakai `config.yml` lokal (seperti `/etc/cloudflared/config.yml`) tidak bisa diubah lewat API.
+  Cukup sekali pasang rule wildcard — mis. `hostname: "*.nifserver.cloud"` → `http://127.0.0.1:8090` **di bawah**
+  rule `drive.`/`panel.` dan di atas `http_status:404` — maka DNS tiap aplikasi baru sudah otomatis dan ingress tidak
+  perlu disentuh lagi. SSL universal gratis hanya mencakup **satu tingkat** subdomain (`app.nifserver.cloud`).
+- Batas upload Cloudflare Free: 100 MB per request (lebih kecil dari `HOSTING_MAX_UPLOAD_MB` bila Anda menaikkannya).
+
+### Manual (tanpa token Cloudflare)
+
+Tanpa variabel di atas, dashboard **tidak** mengubah DNS, Cloudflare, cloudflared, atau Nginx dan **tidak**
+mengasumsikan wildcard DNS.
 Tab **Domain** menampilkan status DNS, apakah `config.yml` cloudflared (jika bisa dibaca) sudah punya rule ke gateway,
 serta snippet & perintah yang perlu dijalankan:
 

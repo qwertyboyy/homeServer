@@ -173,7 +173,28 @@ export interface Prerequisites {
   checkedAt: string;
 }
 
+export interface CloudflareStatus {
+  configured: boolean;
+  dns: boolean;
+  ingress: boolean;
+  zone: string | null;
+  tunnelTarget: string | null;
+}
+
+export interface DomainSyncResult {
+  domain: string;
+  ok: boolean;
+  steps: string[];
+  error: string | null;
+}
+
+export interface HostingOverview {
+  baseDomain: string | null;
+  cloudflare: CloudflareStatus;
+}
+
 export interface DomainStatus {
+  cloudflare: CloudflareStatus;
   gatewayPort: number;
   internalHost: string;
   baseDomain: string | null;
