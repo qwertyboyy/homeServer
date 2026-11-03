@@ -134,6 +134,31 @@ Perilaku & batasan:
   Cukup sekali pasang rule wildcard — mis. `hostname: "*.nifserver.cloud"` → `http://127.0.0.1:8090` **di bawah**
   rule `drive.`/`panel.` dan di atas `http_status:404` — maka DNS tiap aplikasi baru sudah otomatis dan ingress tidak
   perlu disentuh lagi. SSL universal gratis hanya mencakup **satu tingkat** subdomain (`app.nifserver.cloud`).
+
+### Domain dari akun Cloudflare / registrar mana pun (Cloudflare for SaaS)
+
+Untuk domain milik orang lain (saudara, klien) tanpa meminta token mereka. Gratis untuk 100 hostname pertama.
+
+**Setup sekali (di zona Anda, mis. `nifserver.cloud`):**
+
+1. Cloudflare dashboard → zona Anda → **SSL/TLS → Custom Hostnames** → _Enable_ (Cloudflare for SaaS).
+2. Tambahkan izin `Zone → SSL and Certificates → Edit` pada API Token yang sama.
+3. Isi `.env` backend: `CLOUDFLARE_SAAS_EDGE=edge.nifserver.cloud` lalu restart.Dashboard otomatis membuat CNAME
+   `edge` → tunnel dan mengatur _fallback origin_ ke hostname itu.
+4. Tunnel ber-`config.yml` lokal: tambahkan rule `- service: http://127.0.0.1:8090` sebagai rule **terakhir**
+   (menggantikan `http_status:404`) agar hostname pelanggan sampai ke gateway. Tunnel remotely-managed
+   (`CLOUDFLARE_ACCOUNT_ID`) tidak perlu langkah ini; ingress per domain ditambahkan otomatis.
+
+**Setiap domain baru:** tambahkan domain di dashboard seperti biasa. Domain di luar zona Anda otomatis didaftarkan sebagai
+_custom hostname_, lalu dashboard menampilkan satu instruksi untuk pemilik domain:
+
+```
+CNAME  app.domainmereka.com  →  edge.nifserver.cloud
+```
+
+Setelah CNAME dibuat (di registrar atau akun Cloudflare mana pun), tekan _Sinkronkan ke Cloudflare_; sertifikat HTTPS terbit
+otomatis dan status berubah menjadi aktif. Domain tanpa subdomain (apex) hanya bisa bila DNS mereka mendukung CNAME flattening.
+
 - Batas upload Cloudflare Free: 100 MB per request (lebih kecil dari `HOSTING_MAX_UPLOAD_MB` bila Anda menaikkannya).
 
 ### Tanpa Cloudflare: HTTPS otomatis lewat Caddy

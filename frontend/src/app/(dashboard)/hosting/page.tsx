@@ -260,7 +260,11 @@ function CreateForm({ runtimes, overview, onClose }: { runtimes: RuntimeInfo[]; 
             </div>
           </Field>
         )}
-        <Field label={base ? "Domain lain (opsional)" : "Domain (opsional)"} htmlFor="h-domains" hint="Pisahkan dengan koma. Domain di luar zona Cloudflare harus diatur DNS-nya manual.">
+        <Field label={base ? "Domain lain (opsional)" : "Domain (opsional)"} htmlFor="h-domains" hint={
+          overview?.cloudflare.saasEdge
+            ? `Pisahkan dengan koma. Domain dari akun lain: buat CNAME ke ${overview.cloudflare.saasEdge} (instruksi tampil setelah disimpan).`
+            : "Pisahkan dengan koma. Domain di luar zona Cloudflare harus diatur DNS-nya manual."
+        }>
           <input id="h-domains" name="domains" placeholder="app.example.com" className={cx(inputCls, "font-mono")} />
         </Field>
         <Field label="Health check path" htmlFor="h-health">

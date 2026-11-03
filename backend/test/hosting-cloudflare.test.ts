@@ -28,8 +28,10 @@ interface Call {
 type Rec = { id: string; type: string; name: string; content: string };
 
 /** In-memory Cloudflare: one zone, DNS records, and an optional remotely-managed tunnel. */
-function fakeCf(opts: { records?: Rec[]; source?: string; deny?: boolean } = {}) {
+function fakeCf(opts: { records?: Rec[]; source?: string; deny?: boolean; chActive?: boolean } = {}) {
   const records = [...(opts.records ?? [])];
+  const custom: { id: string; hostname: string; status: string; ssl: { status: string } }[] = [];
+  let fallback = "";
   let ingress: { hostname?: string; service: string }[] = [{ hostname: "drive.example.com", service: "http://127.0.0.1:80" }, { service: "http_status:404" }];
   const calls: Call[] = [];
   const fetcher = (async (url: string, init: RequestInit) => {
@@ -60,9 +62,26 @@ function fakeCf(opts: { records?: Rec[]; source?: string; deny?: boolean } = {})
       ingress = body.config.ingress;
       return json({});
     }
+    if (path === `/zones/${ZONE}/custom_hostnames/fallback_origin`) {
+      if (method === "PUT") fallback = body.origin;
+      return json({ origin: fallback });
+    }
+    if (path === `/zones/${ZONE}/custom_hostnames` && method === "GET") {
+      const h = u.searchParams.get("hostname");
+      return json(custom.filter((c) => c.hostname === h));
+    }
+    if (path === `/zones/${ZONE}/custom_hostnames` && method === "POST") {
+      const c = { id: `ch${custom.length}`, hostname: body.hostname, status: opts.chActive ? "active" : "pending", ssl: { status: opts.chActive ? "active" : "pending_validation" } };
+      custom.push(c);
+      return json(c);
+    }
+    if (path.startsWith(`/zones/${ZONE}/custom_hostnames/`) && method === "DELETE") {
+      custom.splice(custom.findIndex((c) => c.id === path.split("/").pop()), 1);
+      return json({});
+    }
     return json(null, 404);
   }) as unknown as typeof fetch;
-  return { fetcher, records, calls, ingress: () => ingress };
+  return { fetcher, records, calls, custom, fallback: () => fallback, ingress: () => ingress };
 }
 
 describe("ingress helpers", () => {
@@ -144,6 +163,31 @@ describe("Cloudflare client", () => {
     expect(r.ok).toBe(true);
     expect(r.steps.join()).toMatch(/config\.yml lokal/);
     expect(f.calls.some((c) => c.method === "PUT")).toBe(false);
+  });
+
+  it("registers domains from other accounts as custom hostnames (Cloudflare for SaaS)", async () => {
+    const f = fakeCf();
+    const cf = new Cloudflare(env({ CLOUDFLARE_SAAS_EDGE: "edge.example.com", CLOUDFLARE_ACCOUNT_ID: ACCOUNT }), f.fetcher);
+    expect((await cf.status()).saasEdge).toBe("edge.example.com");
+    const [r] = await cf.sync(["app.other.org"], []);
+    expect(r.ok).toBe(true);
+    expect(r.steps.join()).toMatch(/CNAME app\.other\.org → edge\.example\.com/);
+    expect(f.records).toMatchObject([{ type: "CNAME", name: "edge.example.com", content: TARGET }]);
+    expect(f.fallback()).toBe("edge.example.com");
+    expect(f.custom.map((c) => c.hostname)).toEqual(["app.other.org"]);
+    expect(f.ingress().map((x) => x.hostname ?? "*")).toContain("app.other.org");
+    await cf.sync(["app.other.org"], []);
+    expect(f.custom).toHaveLength(1);
+    await cf.sync([], ["app.other.org"]);
+    expect(f.custom).toHaveLength(0);
+    expect(f.ingress().map((x) => x.hostname ?? "*")).not.toContain("app.other.org");
+  });
+
+  it("reports an active custom hostname", async () => {
+    const f = fakeCf({ chActive: true });
+    const cf = new Cloudflare(env({ CLOUDFLARE_SAAS_EDGE: "edge.example.com" }), f.fetcher);
+    const [r] = await cf.sync(["app.other.org"], []);
+    expect(r.steps.join()).toMatch(/aktif/);
   });
 
   it("reports API errors without leaking the token", async () => {

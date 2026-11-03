@@ -180,6 +180,7 @@ export interface CloudflareStatus {
   ingress: boolean;
   zone: string | null;
   tunnelTarget: string | null;
+  saasEdge: string | null;
 }
 
 export interface DomainSyncResult {

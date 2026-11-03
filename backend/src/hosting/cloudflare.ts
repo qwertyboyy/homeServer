@@ -25,6 +25,8 @@ export interface CloudflareStatus {
   ingress: boolean;
   zone: string | null;
   tunnelTarget: string | null;
+  /** Hostname that domains from any other account CNAME to (Cloudflare for SaaS), or null when disabled. */
+  saasEdge: string | null;
 }
 
 export interface CloudflareClient {
@@ -45,6 +47,14 @@ interface DnsRecord {
   name: string;
   content: string;
   proxied?: boolean;
+}
+
+interface CustomHostname {
+  id: string;
+  hostname: string;
+  status?: string;
+  ssl?: { status?: string };
+  verification_errors?: string[];
 }
 
 interface IngressRule {
@@ -89,6 +99,7 @@ export function removeIngress(ingress: IngressRule[], hostnames: string[], servi
 
 export class Cloudflare implements CloudflareClient {
   private zoneName: string | null = null;
+  private edgeReady = false;
 
   constructor(
     private readonly env: Env,
@@ -109,6 +120,9 @@ export class Cloudflare implements CloudflareClient {
   }
   private get dnsEnabled() {
     return !!(this.token && this.zoneId && this.tunnelId);
+  }
+  private get saasEdge() {
+    return this.env.CLOUDFLARE_SAAS_EDGE ?? null;
   }
   private get ingressEnabled() {
     return this.dnsEnabled && !!this.accountId;
@@ -160,7 +174,51 @@ export class Cloudflare implements CloudflareClient {
         /* surfaced when syncing */
       }
     }
-    return { configured: this.dnsEnabled, dns: this.dnsEnabled, ingress: this.ingressEnabled, zone, tunnelTarget: this.target };
+    return { configured: this.dnsEnabled, dns: this.dnsEnabled, ingress: this.ingressEnabled, zone, tunnelTarget: this.target, saasEdge: this.dnsEnabled ? this.saasEdge : null };
+  }
+
+  /** Proxied CNAME to the tunnel; never overwrites someone else's record. Returns the step to report. */
+  private async ensureCname(name: string): Promise<string> {
+    const found = await this.call<DnsRecord[]>("GET", `/zones/${this.zoneId}/dns_records?name=${encodeURIComponent(name)}&per_page=5`);
+    const own = found.find((r) => r.type === "CNAME" && r.content.toLowerCase() === this.target);
+    if (own) return "DNS sudah mengarah ke tunnel";
+    if (found.length) throw new CloudflareError(`Sudah ada record DNS ${found[0].type} untuk ${name}; hapus dulu di Cloudflare agar tidak menimpa`);
+    await this.call("POST", `/zones/${this.zoneId}/dns_records`, { type: "CNAME", name, content: this.target, proxied: true, ttl: 1, comment: COMMENT });
+    return "Record CNAME dibuat (proxied)";
+  }
+
+  /** Edge hostname (CNAME to the tunnel) + Custom Hostnames fallback origin, set up once per process. */
+  private async ensureEdge(zone: string) {
+    const edge = this.saasEdge;
+    if (!edge || this.edgeReady) return;
+    if (edge !== zone && !edge.endsWith(`.${zone}`)) throw new CloudflareError(`CLOUDFLARE_SAAS_EDGE (${edge}) harus berada di zona ${zone}`);
+    await this.ensureCname(edge);
+    const current = await this.call<{ origin?: string } | null>("GET", `/zones/${this.zoneId}/custom_hostnames/fallback_origin`).catch(() => null);
+    if (current?.origin?.toLowerCase() !== edge) await this.call("PUT", `/zones/${this.zoneId}/custom_hostnames/fallback_origin`, { origin: edge });
+    this.edgeReady = true;
+  }
+
+  private async ensureCustomHostname(domain: string): Promise<string> {
+    const edge = this.saasEdge!;
+    const found = await this.call<CustomHostname[]>("GET", `/zones/${this.zoneId}/custom_hostnames?hostname=${encodeURIComponent(domain)}&per_page=5`);
+    let ch = found.find((c) => c.hostname.toLowerCase() === domain);
+    if (!ch) {
+      ch = await this.call<CustomHostname>("POST", `/zones/${this.zoneId}/custom_hostnames`, {
+        hostname: domain,
+        ssl: { method: "http", type: "dv", settings: { min_tls_version: "1.2" } },
+      });
+    }
+    if (ch.status === "active" && ch.ssl?.status === "active") return "Custom hostname aktif (HTTPS siap)";
+    const why = ch.verification_errors?.[0] ? ` — ${ch.verification_errors[0]}` : "";
+    return `Menunggu pemilik domain membuat CNAME ${domain} → ${edge} (status ${ch.status ?? "pending"}, SSL ${ch.ssl?.status ?? "pending"})${why}; klik Sinkronkan untuk memeriksa lagi`;
+  }
+
+  private async removeCustomHostname(domain: string): Promise<string> {
+    const found = await this.call<CustomHostname[]>("GET", `/zones/${this.zoneId}/custom_hostnames?hostname=${encodeURIComponent(domain)}&per_page=5`);
+    const ch = found.find((c) => c.hostname.toLowerCase() === domain);
+    if (!ch) return "Tidak ada custom hostname untuk dihapus";
+    await this.call("DELETE", `/zones/${this.zoneId}/custom_hostnames/${ch.id}`);
+    return "Custom hostname dihapus";
   }
 
   async sync(add: string[], remove: string[]): Promise<DomainSyncResult[]> {
@@ -185,35 +243,44 @@ export class Cloudflare implements CloudflareClient {
       return [...results.values()];
     }
     const inZone = (d: string) => d === zone || d.endsWith(`.${zone}`);
-    const eligible = (list: string[]) =>
-      list.filter((d) => {
-        if (inZone(d)) return true;
-        entry(d).steps.push(`DNS dilewati: di luar zona ${zone} (atur manual)`);
-        return false;
-      });
-    const toAdd = eligible(add);
-    const toRemove = eligible(remove);
+    // Domains outside our zone belong to someone else's account: Custom Hostnames when enabled, otherwise manual.
+    const split = (list: string[]) => {
+      const own = list.filter(inZone);
+      const foreign = list.filter((d) => !inZone(d));
+      if (!this.saasEdge) for (const d of foreign) entry(d).steps.push(`DNS dilewati: di luar zona ${zone} (atur manual)`);
+      return { own, foreign: this.saasEdge ? foreign : [] };
+    };
+    const a = split(add);
+    const r = split(remove);
 
-    for (const d of toAdd) {
+    for (const d of a.own) {
       try {
-        const found = await this.call<DnsRecord[]>("GET", `/zones/${this.zoneId}/dns_records?name=${encodeURIComponent(d)}&per_page=5`);
-        const own = found.find((r) => r.type === "CNAME" && r.content.toLowerCase() === this.target);
-        if (own) entry(d).steps.push("DNS sudah mengarah ke tunnel");
-        else if (found.length) throw new CloudflareError(`Sudah ada record DNS ${found[0].type} untuk ${d}; hapus dulu di Cloudflare agar tidak menimpa`);
-        else {
-          await this.call("POST", `/zones/${this.zoneId}/dns_records`, { type: "CNAME", name: d, content: this.target, proxied: true, ttl: 1, comment: COMMENT });
-          entry(d).steps.push("Record CNAME dibuat (proxied)");
-        }
+        entry(d).steps.push(await this.ensureCname(d));
       } catch (err) {
         fail(d, err);
       }
     }
 
-    for (const d of toRemove) {
+    if (a.foreign.length) {
+      try {
+        await this.ensureEdge(zone);
+        for (const d of a.foreign) {
+          try {
+            entry(d).steps.push(await this.ensureCustomHostname(d));
+          } catch (err) {
+            fail(d, err);
+          }
+        }
+      } catch (err) {
+        for (const d of a.foreign) fail(d, err);
+      }
+    }
+
+    for (const d of r.own) {
       try {
         const found = await this.call<DnsRecord[]>("GET", `/zones/${this.zoneId}/dns_records?name=${encodeURIComponent(d)}&type=CNAME&per_page=5`);
         // Only ever delete a record that points at our tunnel.
-        const own = found.find((r) => r.content.toLowerCase() === this.target);
+        const own = found.find((x) => x.content.toLowerCase() === this.target);
         if (own) {
           await this.call("DELETE", `/zones/${this.zoneId}/dns_records/${own.id}`);
           entry(d).steps.push("Record CNAME dihapus");
@@ -222,8 +289,18 @@ export class Cloudflare implements CloudflareClient {
         fail(d, err);
       }
     }
+    for (const d of r.foreign) {
+      try {
+        entry(d).steps.push(await this.removeCustomHostname(d));
+      } catch (err) {
+        fail(d, err);
+      }
+    }
 
-    if (this.ingressEnabled && (toAdd.length || toRemove.length)) await this.syncIngress(toAdd, toRemove, entry, fail);
+    // Custom hostnames reach the tunnel with the customer's Host header, so they need ingress rules too.
+    const ingressAdd = [...a.own, ...a.foreign];
+    const ingressRemove = [...r.own, ...r.foreign];
+    if (this.ingressEnabled && (ingressAdd.length || ingressRemove.length)) await this.syncIngress(ingressAdd, ingressRemove, entry, fail);
     return [...results.values()];
   }
 

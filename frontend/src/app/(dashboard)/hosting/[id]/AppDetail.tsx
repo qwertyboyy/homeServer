@@ -528,7 +528,7 @@ function Domains({ app, refresh }: Props) {
             htmlFor="domains"
             hint={
               cf?.configured
-                ? `DNS di zona ${cf.zone ?? "Cloudflare"} dibuat/dihapus otomatis saat disimpan. drive./panel.nifserver.cloud dicadangkan.`
+                ? `DNS di zona ${cf.zone ?? "Cloudflare"} dibuat/dihapus otomatis saat disimpan.${cf.saasEdge ? ` Domain dari akun lain: pemilik membuat CNAME ke ${cf.saasEdge}.` : ""} drive./panel.nifserver.cloud dicadangkan.`
                 : "drive./panel.nifserver.cloud dicadangkan. Integrasi Cloudflare belum diaktifkan (lihat deploy/hosting/README.md)."
             }
           >
