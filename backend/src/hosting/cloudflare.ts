@@ -100,6 +100,7 @@ export function removeIngress(ingress: IngressRule[], hostnames: string[], servi
 export class Cloudflare implements CloudflareClient {
   private zoneName: string | null = null;
   private edgeReady = false;
+  private readonly zoneCache = new Map<string, { id: string; name: string } | null>();
 
   constructor(
     private readonly env: Env,
@@ -178,13 +179,36 @@ export class Cloudflare implements CloudflareClient {
   }
 
   /** Proxied CNAME to the tunnel; never overwrites someone else's record. Returns the step to report. */
-  private async ensureCname(name: string): Promise<string> {
-    const found = await this.call<DnsRecord[]>("GET", `/zones/${this.zoneId}/dns_records?name=${encodeURIComponent(name)}&per_page=5`);
+  private async ensureCname(zoneId: string, name: string): Promise<string> {
+    const found = await this.call<DnsRecord[]>("GET", `/zones/${zoneId}/dns_records?name=${encodeURIComponent(name)}&per_page=5`);
     const own = found.find((r) => r.type === "CNAME" && r.content.toLowerCase() === this.target);
     if (own) return "DNS sudah mengarah ke tunnel";
     if (found.length) throw new CloudflareError(`Sudah ada record DNS ${found[0].type} untuk ${name}; hapus dulu di Cloudflare agar tidak menimpa`);
-    await this.call("POST", `/zones/${this.zoneId}/dns_records`, { type: "CNAME", name, content: this.target, proxied: true, ttl: 1, comment: COMMENT });
+    await this.call("POST", `/zones/${zoneId}/dns_records`, { type: "CNAME", name, content: this.target, proxied: true, ttl: 1, comment: COMMENT });
     return "Record CNAME dibuat (proxied)";
+  }
+
+  /**
+   * The zone this account manages for `domain`: the configured zone, else any active zone the token can see
+   * (looked up by name, longest suffix first). Null when the domain belongs to someone else's account.
+   */
+  private async findZone(domain: string, primary: { id: string; name: string }): Promise<{ id: string; name: string } | null> {
+    if (domain === primary.name || domain.endsWith(`.${primary.name}`)) return primary;
+    const labels = domain.split(".");
+    for (let i = 0; i <= labels.length - 2; i++) {
+      const name = labels.slice(i).join(".");
+      if (!this.zoneCache.has(name)) {
+        try {
+          const found = await this.call<{ id: string; name: string }[]>("GET", `/zones?name=${encodeURIComponent(name)}&status=active&per_page=1`);
+          this.zoneCache.set(name, found[0] ? { id: found[0].id, name: found[0].name.toLowerCase() } : null);
+        } catch {
+          return null; // token cannot list zones: treat as not ours instead of failing the domain
+        }
+      }
+      const zone = this.zoneCache.get(name);
+      if (zone) return zone;
+    }
+    return null;
   }
 
   /** Edge hostname (CNAME to the tunnel) + Custom Hostnames fallback origin, set up once per process. */
@@ -192,7 +216,7 @@ export class Cloudflare implements CloudflareClient {
     const edge = this.saasEdge;
     if (!edge || this.edgeReady) return;
     if (edge !== zone && !edge.endsWith(`.${zone}`)) throw new CloudflareError(`CLOUDFLARE_SAAS_EDGE (${edge}) harus berada di zona ${zone}`);
-    await this.ensureCname(edge);
+    await this.ensureCname(this.zoneId!, edge);
     const current = await this.call<{ origin?: string } | null>("GET", `/zones/${this.zoneId}/custom_hostnames/fallback_origin`).catch(() => null);
     if (current?.origin?.toLowerCase() !== edge) await this.call("PUT", `/zones/${this.zoneId}/custom_hostnames/fallback_origin`, { origin: edge });
     this.edgeReady = true;
@@ -242,20 +266,26 @@ export class Cloudflare implements CloudflareClient {
       for (const d of [...add, ...remove]) fail(d, err);
       return [...results.values()];
     }
-    const inZone = (d: string) => d === zone || d.endsWith(`.${zone}`);
-    // Domains outside our zone belong to someone else's account: Custom Hostnames when enabled, otherwise manual.
-    const split = (list: string[]) => {
-      const own = list.filter(inZone);
-      const foreign = list.filter((d) => !inZone(d));
-      if (!this.saasEdge) for (const d of foreign) entry(d).steps.push(`DNS dilewati: di luar zona ${zone} (atur manual)`);
+    const primary = { id: this.zoneId!, name: zone };
+    // Domains in a zone of this account get a DNS record directly. Anything else belongs to someone else's
+    // account: Custom Hostnames when enabled, otherwise manual.
+    const split = async (list: string[]) => {
+      const own: { domain: string; zoneId: string }[] = [];
+      const foreign: string[] = [];
+      for (const domain of list) {
+        const z = await this.findZone(domain, primary);
+        if (z) own.push({ domain, zoneId: z.id });
+        else foreign.push(domain);
+      }
+      if (!this.saasEdge) for (const d of foreign) entry(d).steps.push("DNS dilewati: zona domain tidak ada di akun Cloudflare ini (atur manual)");
       return { own, foreign: this.saasEdge ? foreign : [] };
     };
-    const a = split(add);
-    const r = split(remove);
+    const a = await split(add);
+    const r = await split(remove);
 
-    for (const d of a.own) {
+    for (const { domain: d, zoneId } of a.own) {
       try {
-        entry(d).steps.push(await this.ensureCname(d));
+        entry(d).steps.push(await this.ensureCname(zoneId, d));
       } catch (err) {
         fail(d, err);
       }
@@ -276,13 +306,13 @@ export class Cloudflare implements CloudflareClient {
       }
     }
 
-    for (const d of r.own) {
+    for (const { domain: d, zoneId } of r.own) {
       try {
-        const found = await this.call<DnsRecord[]>("GET", `/zones/${this.zoneId}/dns_records?name=${encodeURIComponent(d)}&type=CNAME&per_page=5`);
+        const found = await this.call<DnsRecord[]>("GET", `/zones/${zoneId}/dns_records?name=${encodeURIComponent(d)}&type=CNAME&per_page=5`);
         // Only ever delete a record that points at our tunnel.
         const own = found.find((x) => x.content.toLowerCase() === this.target);
         if (own) {
-          await this.call("DELETE", `/zones/${this.zoneId}/dns_records/${own.id}`);
+          await this.call("DELETE", `/zones/${zoneId}/dns_records/${own.id}`);
           entry(d).steps.push("Record CNAME dihapus");
         } else entry(d).steps.push("Tidak ada record tunnel untuk dihapus");
       } catch (err) {
@@ -298,8 +328,8 @@ export class Cloudflare implements CloudflareClient {
     }
 
     // Custom hostnames reach the tunnel with the customer's Host header, so they need ingress rules too.
-    const ingressAdd = [...a.own, ...a.foreign];
-    const ingressRemove = [...r.own, ...r.foreign];
+    const ingressAdd = [...a.own.map((o) => o.domain), ...a.foreign];
+    const ingressRemove = [...r.own.map((o) => o.domain), ...r.foreign];
     if (this.ingressEnabled && (ingressAdd.length || ingressRemove.length)) await this.syncIngress(ingressAdd, ingressRemove, entry, fail);
     return [...results.values()];
   }

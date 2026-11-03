@@ -127,7 +127,10 @@ Perilaku & batasan:
 - Token hanya dibaca backend, tidak pernah dikirim ke browser, dicatat ke log, atau muncul di pesan error.
 - Record yang **sudah ada** dengan nama sama tetapi bukan CNAME ke tunnel ini **tidak ditimpa** (dilaporkan sebagai konflik).
   Saat menghapus, hanya record yang menunjuk ke tunnel ini yang dihapus.
-- Domain di luar zona (`CLOUDFLARE_ZONE_ID`) dilewati; atur DNS-nya manual.
+- Domain di zona lain **pada akun Cloudflare yang sama** (mis. `dlhpadang.my.id`) ikut otomatis: backend mencari zonanya
+  lewat API dan membuat CNAME di sana. Token harus punya `Zone → Zone → Read` dan `Zone → DNS → Edit` pada zona itu
+  (paling mudah: Zone Resources = _All zones_ di akun tersebut).
+- Domain yang zonanya tidak ditemukan di akun ini dilewati (atau jadi custom hostname bila `CLOUDFLARE_SAAS_EDGE` diisi).
 - Kegagalan Cloudflare **tidak** membatalkan penyimpanan domain; hasilnya tampil di tab Domain, dicatat di audit,
   dan bisa dicoba lagi dengan tombol _Sinkronkan ke Cloudflare_.
 - Tunnel yang memakai `config.yml` lokal (seperti `/etc/cloudflared/config.yml`) tidak bisa diubah lewat API.

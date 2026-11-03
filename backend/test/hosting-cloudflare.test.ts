@@ -25,10 +25,10 @@ interface Call {
   auth: string | null;
 }
 
-type Rec = { id: string; type: string; name: string; content: string };
+type Rec = { id: string; type: string; name: string; content: string; zone?: string };
 
 /** In-memory Cloudflare: one zone, DNS records, and an optional remotely-managed tunnel. */
-function fakeCf(opts: { records?: Rec[]; source?: string; deny?: boolean; chActive?: boolean } = {}) {
+function fakeCf(opts: { records?: Rec[]; source?: string; deny?: boolean; chActive?: boolean; zones?: { id: string; name: string }[] } = {}) {
   const records = [...(opts.records ?? [])];
   const custom: { id: string; hostname: string; status: string; ssl: { status: string } }[] = [];
   let fallback = "";
@@ -44,16 +44,21 @@ function fakeCf(opts: { records?: Rec[]; source?: string; deny?: boolean; chActi
       new Response(JSON.stringify({ success: status < 400, errors: status < 400 ? [] : [{ message: "denied" }], result }), { status });
     if (opts.deny) return json(null, 403);
     if (path === `/zones/${ZONE}`) return json({ name: "example.com" });
-    if (path === `/zones/${ZONE}/dns_records` && method === "GET") {
+    if (path === "/zones" && method === "GET") {
+      const hit = (opts.zones ?? []).find((z) => z.name === u.searchParams.get("name"));
+      return json(hit ? [hit] : []);
+    }
+    const dnsZone = path.match(/^\/zones\/([a-f0-9]{32})\/dns_records$/)?.[1];
+    if (dnsZone && method === "GET") {
       const name = u.searchParams.get("name");
       const type = u.searchParams.get("type");
       return json(records.filter((r) => r.name === name && (!type || r.type === type)));
     }
-    if (path === `/zones/${ZONE}/dns_records` && method === "POST") {
-      records.push({ id: `id${records.length}`, ...body });
+    if (dnsZone && method === "POST") {
+      records.push({ id: `id${records.length}`, zone: dnsZone, ...body });
       return json(body);
     }
-    if (path.startsWith(`/zones/${ZONE}/dns_records/`) && method === "DELETE") {
+    if (/^\/zones\/[a-f0-9]{32}\/dns_records\//.test(path) && method === "DELETE") {
       records.splice(records.findIndex((r) => r.id === path.split("/").pop()), 1);
       return json({});
     }
@@ -131,7 +136,7 @@ describe("Cloudflare client", () => {
     expect(a.ok).toBe(false);
     expect(a.error).toMatch(/Sudah ada record DNS/);
     expect(b.ok).toBe(true);
-    expect(b.steps[0]).toMatch(/di luar zona/);
+    expect(b.steps[0]).toMatch(/zona domain tidak ada di akun/);
     expect(f.records).toHaveLength(1);
   });
 
@@ -163,6 +168,18 @@ describe("Cloudflare client", () => {
     expect(r.ok).toBe(true);
     expect(r.steps.join()).toMatch(/config\.yml lokal/);
     expect(f.calls.some((c) => c.method === "PUT")).toBe(false);
+  });
+
+  it("finds the zone of a domain in the same account and creates its CNAME there", async () => {
+    const OTHER = "c".repeat(32);
+    const f = fakeCf({ zones: [{ id: OTHER, name: "mine.net" }] });
+    const cf = new Cloudflare(env({ CLOUDFLARE_SAAS_EDGE: "edge.example.com" }), f.fetcher);
+    const [r] = await cf.sync(["app.mine.net"], []);
+    expect(r.ok).toBe(true);
+    expect(f.records).toMatchObject([{ type: "CNAME", name: "app.mine.net", content: TARGET, zone: OTHER }]);
+    expect(f.custom).toHaveLength(0);
+    await cf.sync([], ["app.mine.net"]);
+    expect(f.records).toHaveLength(0);
   });
 
   it("registers domains from other accounts as custom hostnames (Cloudflare for SaaS)", async () => {
