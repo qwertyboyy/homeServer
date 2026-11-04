@@ -13,6 +13,7 @@ import {
   ActionBody,
   AppId,
   CreateAppBody,
+  CreateDatabaseBody,
   DatabaseBody,
   DEPLOY_ID_RE,
   DeleteBody,
@@ -203,7 +204,8 @@ export function hostingRouter(service: HostingService, env: Env) {
     router.post(`/apps/:id/database/${operation}`, handle(async (req, res) => {
       const id = appId(req);
       if (operation !== "create" && parse(DeleteBody, req.body).confirm !== id) throw new HostingError(400, "Konfirmasi tidak cocok: ketik ID aplikasi");
-      ok(res, await service.managedDatabase(id, operation, actor(req)));
+      const name = operation === "create" ? parse(CreateDatabaseBody, req.body).name : undefined;
+      ok(res, await service.managedDatabase(id, operation, actor(req), name));
     }));
   }
   router.post("/apps/:id/database/migrate", handle(async (req, res) => {

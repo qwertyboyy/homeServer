@@ -199,7 +199,7 @@ export class Cloudflare implements CloudflareClient {
       const name = labels.slice(i).join(".");
       if (!this.zoneCache.has(name)) {
         try {
-          const found = await this.call<{ id: string; name: string }[]>("GET", `/zones?name=${encodeURIComponent(name)}&status=active&per_page=1`);
+          const found = await this.call<{ id: string; name: string }[]>("GET", `/zones?name=${encodeURIComponent(name)}&status=active&per_page=5`);
           this.zoneCache.set(name, found[0] ? { id: found[0].id, name: found[0].name.toLowerCase() } : null);
         } catch {
           return null; // token cannot list zones: treat as not ours instead of failing the domain

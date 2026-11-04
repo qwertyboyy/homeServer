@@ -951,6 +951,67 @@ describe("caddy on-demand TLS ask hook", () => {
 
 
 describe("managed MySQL", () => {
+  it("creates a custom database and preserves its name through phpMyAdmin, reset, and deletion", async () => {
+    const sql = vi.spyOn(MysqlAdmin.prototype, "run").mockResolvedValue();
+    try {
+      const key = "c".repeat(64);
+      const c = await setup({ PHPMYADMIN_ENABLED: "true", PHPMYADMIN_BRIDGE_KEY: key });
+      await create(c, { id: "portfolio", name: "Portfolio", runtime: "node", deployMethod: "upload" }).expect(201);
+      const base = "/api/v1/hosting/apps/portfolio/database";
+      const result = await request(c.app).post(`${base}/create`).set("Cookie", c.cookie).send({ name: "portofolio_data" }).expect(200);
+      expect(result.body.data.database).toMatchObject({ name: "portofolio_data", user: managedName("portfolio"), managed: true });
+      expect(sql.mock.calls[0][0]).toContain("CREATE DATABASE `portofolio_data`");
+      expect(sql.mock.calls[2][0]).toContain("ON `portofolio\\_data`.*");
+      const runtime = await fs.readFile(c.paths.runtimeEnv("portfolio"), "utf8");
+      expect(runtime).toContain('DB_DATABASE="portofolio_data"');
+      const credentials = await request(c.app).post(`${base}/phpmyadmin-credentials`).set("Cookie", c.cookie).set("X-Nif-Pma-Key", key).send({}).expect(200);
+      expect(credentials.body.data).toMatchObject({ database: "portofolio_data", user: managedName("portfolio") });
+      await request(c.app).put(base).set("Cookie", c.cookie).send({ type: "mysql", name: "other" }).expect(409);
+      await request(c.app).put(base).set("Cookie", c.cookie).send({ type: "mysql", autoMigrate: false }).expect(200);
+      await request(c.app).post(`${base}/reset`).set("Cookie", c.cookie).send({ confirm: "portfolio" }).expect(200);
+      expect((await getApp(c, "portfolio")).database.name).toBe("portofolio_data");
+      expect(sql.mock.calls[3][0]).toContain(`ALTER USER '${managedName("portfolio")}'`);
+      await request(c.app).post(`${base}/delete`).set("Cookie", c.cookie).send({ confirm: "portfolio" }).expect(200);
+      expect(sql.mock.calls[4][0]).toBe(`DROP DATABASE IF EXISTS \`portofolio_data\`; DROP USER IF EXISTS '${managedName("portfolio")}'@'127.0.0.1';`);
+    } finally { sql.mockRestore(); }
+  });
+
+  it("rejects unsafe, reserved, and duplicate names before executing SQL", async () => {
+    const sql = vi.spyOn(MysqlAdmin.prototype, "run").mockResolvedValue();
+    try {
+      const c = await setup();
+      for (const id of ["first-app", "second-app"]) {
+        await create(c, { id, name: id, runtime: "node", deployMethod: "upload" }).expect(201);
+      }
+      const post = (id: string, body: object) => request(c.app).post(`/api/v1/hosting/apps/${id}/database/create`).set("Cookie", c.cookie).send(body);
+      for (const name of ["", "mysql", "sys", "information_schema", "performance_schema", "name`; DROP DATABASE mysql;--", "../db", "db%", "a".repeat(65)]) {
+        await post("first-app", { name }).expect(400);
+      }
+      await post("first-app", { name: "valid", user: "root" }).expect(400);
+      expect(sql).not.toHaveBeenCalled();
+      await post("first-app", { name: "portfolio" }).expect(200);
+      await post("second-app", { name: "portfolio" }).expect(409);
+      expect(sql).toHaveBeenCalledTimes(3);
+      expect((await getApp(c, "second-app")).database.type).toBe("none");
+    } finally { sql.mockRestore(); }
+  });
+
+  it("reports missing admin configuration without recording a database as created", async () => {
+    const c = await setup({ HOSTING_MYSQL_DEFAULTS_FILE: "" });
+    await create(c, { id: "no-admin", name: "No admin", runtime: "node", deployMethod: "upload" }).expect(201);
+    const result = await request(c.app).post("/api/v1/hosting/apps/no-admin/database/create").set("Cookie", c.cookie).send({ name: "portfolio" }).expect(503);
+    expect(JSON.stringify(result.body)).toContain("HOSTING_MYSQL_DEFAULTS_FILE");
+    expect((await getApp(c, "no-admin")).database.type).toBe("none");
+  });
+
+  it("does not drop an existing custom database when creation is rejected", async () => {
+    const sql = vi.spyOn(MysqlAdmin.prototype, "run").mockRejectedValueOnce(new Error("database exists"));
+    try {
+      await expect(new MysqlAdmin("unused").create("portfolio", "a".repeat(64), "portfolio")).rejects.toThrow("database exists");
+      expect(sql).toHaveBeenCalledTimes(1);
+    } finally { sql.mockRestore(); }
+  });
+
   it("keeps generated credentials private, requires confirmation and protects manual databases", async () => {
     const sql = vi.spyOn(MysqlAdmin.prototype, "run").mockResolvedValue();
     try {

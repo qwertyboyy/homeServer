@@ -722,7 +722,10 @@ function Environment({ app, refresh }: Props) {
 
 function DatabaseTab({ app, refresh }: Props) {
   const db = app.database;
-  const [type, setType] = useState(db.type);
+  const [selectedType, setType] = useState(db.type);
+  const type = db.managed ? db.type : selectedType;
+  const [createName, setCreateName] = useState(app.id.replace(/-/g, "_"));
+  const [notice, setNotice] = useState<string | null>(null);
   const save = useMutation();
   const server = type === "mysql" || type === "postgresql";
   const name = db.name ?? app.id.replace(/-/g, "_");
@@ -756,16 +759,36 @@ function DatabaseTab({ app, refresh }: Props) {
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1fr]">
       <Card>
         <CardTitle icon={Database} title="Database aplikasi" />
+        {db.type === "none" && (
+          <form className="mt-3 space-y-3" onSubmit={async e => {
+            e.preventDefault();
+            setNotice(null);
+            const result = await save.run(() => api<HostedAppDetail>(`/hosting/apps/${app.id}/database/create`, { method: "POST", json: { name: createName.trim() } }));
+            if (result?.data) {
+              setType("mysql");
+              setNotice(`Database ${result.data.database.name} berhasil dibuat. Buka phpMyAdmin untuk melihat tabel atau mengimpor SQL.`);
+              refresh();
+            }
+          }}>
+            <Field label="Nama database baru" htmlFor="db-create-name" hint="1–64 karakter a-z, 0-9, dan _. Diawali huruf. Nama harus belum digunakan.">
+              <input id="db-create-name" value={createName} onChange={e => setCreateName(e.target.value)} required maxLength={64} pattern="[a-z][a-z0-9_]{0,63}" disabled={save.busy} className={cx(inputCls, "font-mono")} />
+            </Field>
+            <Button type="submit" disabled={save.busy}>Buat database MySQL</Button>
+          </form>
+        )}
+        {notice && <p role="status" className="mt-3 text-sm text-ok">{notice}</p>}
+        {db.managed && <p className="mt-3 text-sm text-ink-2">Database aktif: <strong className="font-mono">{db.name}</strong>. Koneksi dikelola dashboard. Nama ditentukan saat pembuatan; user dan password dibuat otomatis.</p>}
         <div className="my-3 flex flex-wrap gap-2">
           {app.phpMyAdminAvailable && <a href={`/phpmyadmin/nifhost-signon.php?app=${encodeURIComponent(app.id)}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center rounded-lg bg-primary px-3 py-2 text-sm font-medium text-white">Buka phpMyAdmin</a>}
 
-          {db.type === "none" && <Button disabled={save.busy} onClick={async () => {
-            if (await save.run(() => api(`/hosting/apps/${app.id}/database/create`, { method: "POST", json: {} }))) refresh();
-          }}>Buat database MySQL</Button>}
           {db.managed && (["reset", "delete"] as const).map(operation => <Button key={operation} disabled={save.busy} onClick={async () => {
             const confirm = window.prompt(`${operation === "delete" ? "Hapus permanen database beserta seluruh isinya" : "Reset password database; restart aplikasi setelah selesai"}. Ketik ID aplikasi: ${app.id}`);
             if (confirm !== app.id) return;
-            if (await save.run(() => api(`/hosting/apps/${app.id}/database/${operation}`, { method: "POST", json: { confirm } }))) refresh();
+            if (await save.run(() => api(`/hosting/apps/${app.id}/database/${operation}`, { method: "POST", json: { confirm } }))) {
+              if (operation === "delete") setType("none");
+              setNotice(operation === "delete" ? "Database berhasil dihapus." : "Password database berhasil direset. Restart aplikasi agar password baru dipakai.");
+              refresh();
+            }
           }}>{operation === "delete" ? "Hapus database" : "Reset password"}</Button>)}
           {app.runtime === "laravel" && db.type !== "none" && <Button disabled={save.busy} onClick={async () => {
             const confirm = window.prompt(`Migrasi mengubah schema database. Ketik ID aplikasi: ${app.id}`);
@@ -775,9 +798,9 @@ function DatabaseTab({ app, refresh }: Props) {
         </div>
 
         {db.type === "mysql" && !app.phpMyAdminAvailable && <p className="mb-3 text-sm text-muted">{db.managed ? "Akses phpMyAdmin belum diaktifkan di server." : "Akses phpMyAdmin dari dashboard tersedia untuk database MySQL yang dibuat dashboard."}</p>}
-        <form onSubmit={submit} className="space-y-3">
+        <form key={`${db.type}:${db.name}:${db.user}`} onSubmit={submit} className="space-y-3">
           <Field label="Jenis" htmlFor="db-type">
-            <select id="db-type" value={type} onChange={(e) => setType(e.target.value as typeof type)} className={inputCls}>
+            <select id="db-type" value={type} disabled={db.managed || save.busy} onChange={(e) => setType(e.target.value as typeof type)} className={inputCls}>
               <option value="none">Tidak ada</option>
               <option value="sqlite">SQLite (file per aplikasi, tanpa server)</option>
               <option value="mysql">MySQL / MariaDB (localhost)</option>
@@ -787,29 +810,29 @@ function DatabaseTab({ app, refresh }: Props) {
           {server && (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Host" htmlFor="db-host" hint="Hanya localhost — sandbox aplikasi memblokir jaringan LAN.">
-                <select id="db-host" name="host" defaultValue={db.host ?? "127.0.0.1"} className={inputCls}>
+                <select id="db-host" name="host" disabled={db.managed} defaultValue={db.host ?? "127.0.0.1"} className={inputCls}>
                   <option>127.0.0.1</option>
                   <option>localhost</option>
                   <option>::1</option>
                 </select>
               </Field>
               <Field label="Port" htmlFor="db-port">
-                <input id="db-port" name="port" inputMode="numeric" defaultValue={db.port ?? ""} placeholder={type === "mysql" ? "3306" : "5432"} className={inputCls} />
+                <input id="db-port" name="port" readOnly={db.managed} inputMode="numeric" defaultValue={db.port ?? ""} placeholder={type === "mysql" ? "3306" : "5432"} className={inputCls} />
               </Field>
               <Field label="Nama database" htmlFor="db-name">
-                <input id="db-name" name="name" required defaultValue={db.name ?? name} className={cx(inputCls, "font-mono")} />
+                <input id="db-name" name="name" readOnly={db.managed} required defaultValue={db.name ?? name} className={cx(inputCls, "font-mono")} />
               </Field>
               <Field label="User" htmlFor="db-user">
-                <input id="db-user" name="user" required defaultValue={db.user ?? user} className={cx(inputCls, "font-mono")} />
+                <input id="db-user" name="user" readOnly={db.managed} required defaultValue={db.user ?? user} className={cx(inputCls, "font-mono")} />
               </Field>
               <Field label="Password" htmlFor="db-pass" hint={db.passwordSet ? "Tersimpan. Kosongkan untuk mempertahankan." : "Disimpan sebagai secret."}>
-                <input id="db-pass" name="password" type="password" autoComplete="new-password" placeholder={db.passwordSet ? "••••••" : ""} className={inputCls} />
+                <input id="db-pass" name="password" disabled={db.managed} type="password" autoComplete="new-password" placeholder={db.passwordSet ? "••••••" : ""} className={inputCls} />
               </Field>
             </div>
           )}
           {app.runtime === "laravel" && <label className="flex gap-2 text-sm"><input type="checkbox" name="autoMigrate" defaultChecked={db.autoMigrate} />Jalankan migrasi otomatis sebelum setiap deploy. Perubahan schema tidak dibatalkan saat rollback.</label>}
           <InlineError message={save.error} />
-          <Button type="submit" icon={Save} disabled={save.busy}>
+          <Button type="submit" icon={Save} disabled={save.busy || (db.managed && app.runtime !== "laravel")}>
             Simpan
           </Button>
         </form>
@@ -827,9 +850,9 @@ function DatabaseTab({ app, refresh }: Props) {
           <div className="space-y-3 text-sm text-ink-2">
             <p>
               Variabel <span className="font-mono text-xs">DB_HOST, DB_PORT, DB_DATABASE, DB_USERNAME, DB_PASSWORD, DATABASE_URL</span> disuntikkan saat runtime. Server database
-              tersedia setelah konfigurasi disimpan. Gunakan tombol Buat database MySQL untuk pengelolaan otomatis, atau buat database manual di server:
+              harus tersedia di server. {db.managed ? "Database ini sudah dibuat dan dikelola dashboard. Gunakan phpMyAdmin atau migrasi project untuk mengisi tabel." : "Untuk koneksi manual, buat database dan user di server sebelum menyimpan konfigurasinya:"}
             </p>
-            <CopyBlock text={sql} label="Salin SQL" />
+            {!db.managed && <CopyBlock text={sql} label="Salin SQL" />}
           </div>
         )}
         <p className="mt-3 text-xs text-muted">Perubahan berlaku setelah restart aplikasi.</p>

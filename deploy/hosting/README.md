@@ -255,8 +255,14 @@ perlindungan replay, dan manajemen secret — sengaja ditunda). Deploy dipicu ma
 Tab Database: **Buat database MySQL**, **Reset password**, **Hapus database** (ketik ID),
 **Migrate Laravel**, dan checkbox migrasi otomatis sebelum aktivasi rilis.
 Saat menghapus aplikasi, checkbox penghapusan database secara default mati.
-Database manual tidak pernah dihapus/reset oleh fitur ini. Nama database/user terkelola
-adalah `nifdb` + 24 digit hash ID aplikasi (29 karakter; ID dengan tanda hubung tidak bertabrakan).
+Database manual tidak pernah dihapus/reset oleh fitur ini. Saat membuat database, isi
+**Nama database baru**, misalnya `portofolio`. Nama menerima 1–64 karakter `a-z`, `0-9`,
+dan `_`, diawali huruf; nama sistem dan nama yang sudah digunakan ditolak.
+User terkelola tetap `nifdb` + 24 digit hash ID aplikasi (29 karakter; ID dengan tanda hubung tidak bertabrakan).
+API `POST /api/v1/hosting/apps/:id/database/create` menerima `{ "name": "portofolio" }`.
+Request lama `{}` tetap membuat nama database otomatis seperti sebelumnya.
+Reset password, penghapusan, environment, dan phpMyAdmin memakai nama database yang disimpan.
+Database lama tidak diganti namanya atau dipindahkan otomatis; migrasi nama/data dilakukan terpisah dengan backup.
 Password acak 32 byte disimpan hanya sebagai secret. Restart aplikasi setelah reset password.
 
 Prasyarat server: MySQL 8, `/usr/bin/mysql` (paket mysql-client), PHP CLI + pdo_mysql.
@@ -276,6 +282,20 @@ CREATE USER 'nifhost_admin'@'127.0.0.1' IDENTIFIED BY 'GANTI_PASSWORD_ADMIN_KUAT
 GRANT ALL PRIVILEGES ON `nifdb%`.* TO 'nifhost_admin'@'127.0.0.1' WITH GRANT OPTION;
 GRANT CREATE USER ON *.* TO 'nifhost_admin'@'127.0.0.1';
 ```
+
+Grant prefix `nifdb%` di atas hanya mencakup nama otomatis atau custom yang berawalan
+`nifdb`. Untuk nama custom lain, administrator harus memberi izin pada nama yang
+akan dipakai **sebelum** menekan Buat database MySQL. Contoh untuk `portofolio`:
+
+```sql
+GRANT ALL PRIVILEGES ON `portofolio`.* TO 'nifhost_admin'@'127.0.0.1' WITH GRANT OPTION;
+```
+
+Gunakan nama database spesifik; jangan memberi akses data global untuk mengaktifkan
+nama custom. Untuk nama dengan `_`, escape wildcard pada GRANT, misalnya
+`` `portofolio\_data`.* `` (konfigurasi `partial_revokes=OFF` yang didukung di atas).
+User aplikasi hanya menerima grant pada database tersebut. Hak membuat user tetap
+mengikuti konfigurasi admin sebelumnya.
 
 `CREATE USER` adalah hak global yang juga memungkinkan perubahan/penghapusan akun lain.
 Jadi akun ini bukan boundary isolasi akun MySQL; gunakan instance MySQL khusus hosting

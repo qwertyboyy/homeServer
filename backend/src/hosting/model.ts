@@ -92,6 +92,10 @@ export const AppOptions = z
 export type AppOptions = z.infer<typeof AppOptions>;
 
 export const DbType = z.enum(["none", "sqlite", "mysql", "postgresql"]);
+export const ManagedDatabaseName = z.string().trim()
+  .regex(/^[a-z][a-z0-9_]{0,63}$/, "Nama database: 1–64 karakter a-z, 0-9, _, diawali huruf")
+  .refine(name => !["mysql", "sys", "information_schema", "performance_schema"].includes(name), "Nama database sistem tidak boleh digunakan");
+export const CreateDatabaseBody = z.object({ name: ManagedDatabaseName.optional() }).strict();
 export const DbConfig = z.object({
   type: DbType,
   host: z.string().nullable(),

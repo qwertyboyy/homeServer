@@ -1,4 +1,4 @@
-import { MysqlAdmin, managedName } from "./mysql.js";
+import { MysqlAdmin, MysqlAdminError, managedName } from "./mysql.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import net from "node:net";
@@ -16,6 +16,7 @@ import { checkRepoSource, normalizeRepoUrl, SourceError, systemResolver, type Re
 import { httpProbe, waitHealthy, type HealthProbe, type ProbeResult } from "./health.js";
 import {
   envKeyProblem,
+  ManagedDatabaseName,
   isProcessRuntime,
   newId,
   type AppOptions,
@@ -527,6 +528,12 @@ export class HostingService {
     this.requireApp(id);
     if (this.busy) throw new HostingError(409, "Operasi hosting sedang berjalan");
     if (this.requireApp(id).database.managed) {
+      const db = this.requireApp(id).database;
+      if (body.type !== db.type || (body.name !== undefined && body.name !== db.name) ||
+          (body.user !== undefined && body.user !== db.user) || (body.host !== undefined && body.host !== db.host) ||
+          (body.port !== undefined && body.port !== db.port) || body.password !== undefined) {
+        throw new HostingError(409, "Koneksi database terkelola tidak bisa diubah. Nama ditentukan saat pembuatan; gunakan Reset password untuk mengganti password.");
+      }
       const updated = (await this.registry.update(id, a => ({ ...a, database: { ...a.database, autoMigrate: body.autoMigrate ?? a.database.autoMigrate } })))!;
       await this.secrets.write(updated, await this.secrets.read(id));
       return this.getApp(id);
@@ -549,7 +556,7 @@ export class HostingService {
     if (!this.deps.env.PHPMYADMIN_ENABLED) throw new HostingError(404, "phpMyAdmin belum diaktifkan");
     const app = this.requireApp(id);
     const db = app.database;
-    if (db.type !== "mysql" || !db.managed || db.user !== managedName(id) || db.name !== managedName(id) || db.host !== "127.0.0.1" || db.port !== 3306) {
+    if (db.type !== "mysql" || !db.managed || db.user !== managedName(id) || !ManagedDatabaseName.safeParse(db.name).success || db.host !== "127.0.0.1" || db.port !== 3306) {
       throw new HostingError(400, "phpMyAdmin tersedia untuk database MySQL yang dibuat dashboard");
     }
     const { dbPassword } = await this.secrets.read(id);
@@ -558,25 +565,34 @@ export class HostingService {
     return { user: db.user, password: dbPassword, host: db.host, port: db.port, database: db.name };
   }
 
-  async managedDatabase(id: string, operation: "create" | "reset" | "delete", actor: string) {
+  async managedDatabase(id: string, operation: "create" | "reset" | "delete", actor: string, requestedName?: string) {
     const app = this.requireApp(id);
     this.claim(app);
     try {
       const admin = new MysqlAdmin(this.deps.env.HOSTING_MYSQL_DEFAULTS_FILE);
       if (operation === "create" && app.database.type !== "none") throw new HostingError(409, "Lepaskan konfigurasi database lama terlebih dahulu");
-      if (operation !== "create" && (!app.database.managed || app.database.name !== managedName(id))) throw new HostingError(400, "Bukan database yang dikelola dashboard");
+      if (operation !== "create" && (!app.database.managed || app.database.type !== "mysql" || app.database.user !== managedName(id) || !ManagedDatabaseName.safeParse(app.database.name).success || app.database.host !== "127.0.0.1" || app.database.port !== 3306)) throw new HostingError(400, "Bukan database yang dikelola dashboard");
+      const parsedName = ManagedDatabaseName.safeParse(operation === "create" ? requestedName ?? managedName(id) : app.database.name);
+      if (!parsedName.success) throw new HostingError(400, "Nama database tidak valid atau dicadangkan sistem");
+      const name = parsedName.data;
+      if (operation === "create" && this.registry.list().some(a => a.id !== id && a.database.type === "mysql" && a.database.name?.toLowerCase() === name)) {
+        throw new HostingError(409, "Nama database sudah dipakai aplikasi lain");
+      }
       const password = crypto.randomBytes(32).toString("hex");
-      if (operation === "create") await admin.create(id, password);
+      if (operation === "create") await admin.create(id, password, name);
       else if (operation === "reset") await admin.reset(id, password);
-      else await admin.drop(id);
+      else await admin.drop(id, name);
       const database: AppRecord["database"] = operation === "delete"
         ? { type: "none", host: null, port: null, name: null, user: null, passwordSet: false, managed: false, autoMigrate: false }
-        : { type: "mysql", host: "127.0.0.1", port: 3306, name: managedName(id), user: managedName(id), passwordSet: true, managed: true, autoMigrate: app.database.autoMigrate };
+        : { type: "mysql", host: "127.0.0.1", port: 3306, name, user: managedName(id), passwordSet: true, managed: true, autoMigrate: app.database.autoMigrate };
       const updated = { ...app, database };
       await this.secrets.write(updated, { ...await this.secrets.read(id), dbPassword: operation === "delete" ? null : password });
       await this.registry.update(id, a => ({ ...a, database }));
       await this.audit.record(actor, `database.${operation}`, id, `Database MySQL: ${operation}`);
       return this.getApp(id);
+    } catch (error) {
+      if (error instanceof MysqlAdminError) throw new HostingError(503, error.message);
+      throw error;
     } finally { this.busy = null; }
   }
 
